@@ -24,7 +24,7 @@ import re
 import smtplib
 import ssl
 import uuid
-from email.header import decode_header
+from email.header import decode_header, Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -94,7 +94,7 @@ def _is_automated_sender(address: str, headers: dict) -> bool:
     if any(pattern in addr for pattern in _NOREPLY_PATTERNS):
         return True
     for header, check in _AUTOMATED_HEADERS.items():
-        value = headers.get(header, "")
+        value = _safe_header_to_str(headers.get(header, ""))
         if value and check(value):
             return True
     return False
@@ -112,6 +112,7 @@ def check_email_requirements() -> bool:
 
 def _decode_header_value(raw: str) -> str:
     """Decode an RFC 2047 encoded email header into a plain string."""
+    raw = _safe_header_to_str(raw)
     parts = decode_header(raw)
     decoded = []
     for part, charset in parts:
@@ -120,6 +121,31 @@ def _decode_header_value(raw: str) -> str:
         else:
             decoded.append(part)
     return " ".join(decoded)
+
+
+def _safe_header_to_str(value) -> str:
+    """Convert an email.header.Header object to a plain string safely.
+
+    Python's email.message_from_bytes with compat32 policy returns Header
+    objects for headers containing 8-bit bytes (non-MIME-encoded).  str()
+    and decode_header() both crash on unknown-8bit Header objects in some
+    Python versions, so we decode from the internal _chunks directly.
+    """
+    if not isinstance(value, Header):
+        return str(value) if not isinstance(value, str) else value
+    parts = []
+    for s, charset in value._chunks:
+        cs_str = str(charset) if charset else "utf-8"
+        # unknown-8bit is not a real codec — preserve raw bytes as latin-1
+        if cs_str == "unknown-8bit":
+            cs_str = "latin-1"
+        if isinstance(s, bytes):
+            parts.append(s.decode(cs_str, errors="replace"))
+        else:
+            # str with possible surrogate-escaped bytes
+            parts.append(s.encode("utf-8", errors="surrogateescape").decode(
+                cs_str, errors="replace"))
+    return "".join(parts)
 
 
 def _extract_text_body(msg: email_lib.message.Message) -> str:
@@ -176,6 +202,7 @@ def _strip_html(html: str) -> str:
 
 def _extract_email_address(raw: str) -> str:
     """Extract bare email address from 'Name <addr>' format."""
+    raw = _safe_header_to_str(raw)
     match = re.search(r"<([^>]+)>", raw)
     if match:
         return match.group(1).strip().lower()
