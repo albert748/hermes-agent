@@ -791,28 +791,52 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
     """Inspect a tool result string for signs of failure.
 
     Returns ``(is_failure, suffix)`` where *suffix* is an informational tag
-    like ``" [exit 1]"`` for terminal failures, or ``" [error]"`` for generic
-    failures.  On success, returns ``(False, "")``.
+    like ``" [exit 1]"`` or a short error message.
     """
     if result is None:
         return False, ""
     if file_mutation_result_landed(tool_name, result):
         return False, ""
 
+    data = safe_json_loads(result)
+
     if tool_name == "terminal":
-        data = safe_json_loads(result)
         if isinstance(data, dict):
             exit_code = data.get("exit_code")
             if exit_code is not None and exit_code != 0:
+                err_msg = data.get("error")
+                if err_msg:
+                    return True, f" [{str(err_msg)[:32]}]"
                 return True, f" [exit {exit_code}]"
         return False, ""
 
     # Memory-specific: distinguish "full" from real errors
     if tool_name == "memory":
-        data = safe_json_loads(result)
         if isinstance(data, dict):
             if data.get("success") is False and "exceed the limit" in data.get("error", ""):
                 return True, " [full]"
+
+    # Web-search-specific: empty results are treated as failure
+    if tool_name == "web_search":
+        if isinstance(data, dict):
+            web_data = data.get("data", {}).get("web", [])
+            if data.get("success") is True and len(web_data) == 0:
+                return True, " [0 results]"
+
+    # Extract specific error message if present in JSON
+    if isinstance(data, dict):
+        err = data.get("error") or data.get("message")
+        # For terminal, we already checked exit_code. For others, we check 'error' key.
+        # But 'read_file' returns error even if 'success' is not explicitly False.
+        if err and (data.get("success") is False or "error" in data):
+            # Clean up long paths in error messages
+            err_str = str(err)
+            if "File not found:" in err_str:
+                path_part = err_str.split("File not found:", 1)[1].strip()
+                if "/" in path_part:
+                    filename = path_part.split("/")[-1]
+                    err_str = f"File not found: {filename}"
+            return True, f" [{err_str[:32]}]"
 
     # Generic heuristic for non-terminal tools
     # Multimodal tool results (dicts with _multimodal=True) are not strings —
@@ -840,18 +864,18 @@ def get_cute_tool_message(
     is_failure, failure_suffix = _detect_tool_failure(tool_name, result)
     skin_prefix = get_skin_tool_prefix()
 
-    def _trunc(s, n=40):
+    def _trunc(s, n=256):
         s = str(s)
         if _tool_preview_max_len == 0:
             return s  # no limit
-        limit = _tool_preview_max_len
+        limit = max(n, _tool_preview_max_len)
         return (s[:limit-3] + "...") if len(s) > limit else s
 
-    def _path(p, n=35):
+    def _path(p, n=128):
         p = str(p)
         if _tool_preview_max_len == 0:
             return p  # no limit
-        limit = _tool_preview_max_len
+        limit = max(n, _tool_preview_max_len)
         return ("..." + p[-(limit-3):]) if len(p) > limit else p
 
     def _wrap(line: str) -> str:
@@ -863,21 +887,28 @@ def get_cute_tool_message(
         return f"{line}{failure_suffix}"
 
     if tool_name == "web_search":
-        return _wrap(f"┊ 🔍 search    {_trunc(args.get('query', ''), 42)}  {dur}")
+        count_note = ""
+        if result:
+            data = safe_json_loads(result)
+            if isinstance(data, dict):
+                web_data = data.get("data", {}).get("web", [])
+                count = len(web_data)
+                count_note = f"  ({count} result{'s' if count != 1 else ''})"
+        return _wrap(f"┊ 🔍 search    {_trunc(args.get('query', ''), 64)}{count_note}  {dur}")
     if tool_name == "web_extract":
         urls = args.get("urls", [])
         if urls:
             url = urls[0] if isinstance(urls, list) else str(urls)
             domain = url.replace("https://", "").replace("http://", "").split("/")[0]
             extra = f" +{len(urls)-1}" if len(urls) > 1 else ""
-            return _wrap(f"┊ 📄 fetch     {_trunc(domain, 35)}{extra}  {dur}")
+            return _wrap(f"┊ 📄 fetch     {_trunc(domain, 64)}{extra}  {dur}")
         return _wrap(f"┊ 📄 fetch     pages  {dur}")
     if tool_name == "web_crawl":
         url = args.get("url", "")
         domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-        return _wrap(f"┊ 🕸️  crawl     {_trunc(domain, 35)}  {dur}")
+        return _wrap(f"┊ 🕸️  crawl     {_trunc(domain, 64)}  {dur}")
     if tool_name == "terminal":
-        return _wrap(f"┊ 💻 $         {_trunc(args.get('command', ''), 42)}  {dur}")
+        return _wrap(f"┊ 💻 $         {_trunc(args.get('command', ''), 256)}  {dur}")
     if tool_name == "process":
         action = args.get("action", "?")
         sid = args.get("session_id", "")[:12]
@@ -891,21 +922,21 @@ def get_cute_tool_message(
     if tool_name == "patch":
         return _wrap(f"┊ 🔧 patch     {_path(args.get('path', ''))}  {dur}")
     if tool_name == "search_files":
-        pattern = _trunc(args.get("pattern", ""), 35)
+        pattern = _trunc(args.get("pattern", ""), 64)
         target = args.get("target", "content")
         verb = "find" if target == "files" else "grep"
         return _wrap(f"┊ 🔎 {verb:9} {pattern}  {dur}")
     if tool_name == "browser_navigate":
         url = args.get("url", "")
         domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-        return _wrap(f"┊ 🌐 navigate  {_trunc(domain, 35)}  {dur}")
+        return _wrap(f"┊ 🌐 navigate  {_trunc(domain, 64)}  {dur}")
     if tool_name == "browser_snapshot":
         mode = "full" if args.get("full") else "compact"
         return _wrap(f"┊ 📸 snapshot  {mode}  {dur}")
     if tool_name == "browser_click":
         return _wrap(f"┊ 👆 click     {args.get('ref', '?')}  {dur}")
     if tool_name == "browser_type":
-        return _wrap(f"┊ ⌨️  type      \"{_trunc(args.get('text', ''), 30)}\"  {dur}")
+        return _wrap(f"┊ ⌨️  type      \"{_trunc(args.get('text', ''), 64)}\"  {dur}")
     if tool_name == "browser_scroll":
         d = args.get("direction", "down")
         arrow = {"down": "↓", "up": "↑", "right": "→", "left": "←"}.get(d, "↓")
@@ -928,56 +959,57 @@ def get_cute_tool_message(
         else:
             return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
     if tool_name == "session_search":
-        return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
+        return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 64)}\"  {dur}")
     if tool_name == "memory":
         action = args.get("action", "?")
         target = args.get("target", "")
         if action == "add":
-            return _wrap(f"┊ 🧠 memory    +{target}: \"{_trunc(args.get('content', ''), 30)}\"  {dur}")
+            return _wrap(f"┊ 🧠 memory    +{target}: \"{_trunc(args.get('content', ''), 64)}\"  {dur}")
         elif action == "replace":
             old = args.get("old_text") or ""
             old = old if old else "<missing old_text>"
-            return _wrap(f"┊ 🧠 memory    ~{target}: \"{_trunc(old, 20)}\"  {dur}")
+            return _wrap(f"┊ 🧠 memory    ~{target}: \"{_trunc(old, 64)}\"  {dur}")
         elif action == "remove":
             old = args.get("old_text") or ""
             old = old if old else "<missing old_text>"
-            return _wrap(f"┊ 🧠 memory    -{target}: \"{_trunc(old, 20)}\"  {dur}")
+            return _wrap(f"┊ 🧠 memory    -{target}: \"{_trunc(old, 64)}\"  {dur}")
         return _wrap(f"┊ 🧠 memory    {action}  {dur}")
     if tool_name == "skills_list":
         return _wrap(f"┊ 📚 skills    list {args.get('category', 'all')}  {dur}")
     if tool_name == "skill_view":
-        return _wrap(f"┊ 📚 skill     {_trunc(args.get('name', ''), 30)}  {dur}")
+        return _wrap(f"┊ 📚 skill     {_trunc(args.get('name', ''), 64)}  {dur}")
     if tool_name == "image_generate":
-        return _wrap(f"┊ 🎨 create    {_trunc(args.get('prompt', ''), 35)}  {dur}")
+        return _wrap(f"┊ 🎨 create    {_trunc(args.get('prompt', ''), 64)}  {dur}")
     if tool_name == "text_to_speech":
-        return _wrap(f"┊ 🔊 speak     {_trunc(args.get('text', ''), 30)}  {dur}")
+        return _wrap(f"┊ 🔊 speak     {_trunc(args.get('text', ''), 64)}  {dur}")
     if tool_name == "vision_analyze":
-        return _wrap(f"┊ 👁️  vision    {_trunc(args.get('question', ''), 30)}  {dur}")
+        return _wrap(f"┊ 👁️  vision    {_trunc(args.get('question', ''), 64)}  {dur}")
     if tool_name == "mixture_of_agents":
-        return _wrap(f"┊ 🧠 reason    {_trunc(args.get('user_prompt', ''), 30)}  {dur}")
+        return _wrap(f"┊ 🧠 reason    {_trunc(args.get('user_prompt', ''), 64)}  {dur}")
     if tool_name == "send_message":
-        return _wrap(f"┊ 📨 send      {args.get('target', '?')}: \"{_trunc(args.get('message', ''), 25)}\"  {dur}")
+        return _wrap(f"┊ 📨 send      {args.get('target', '?')}: \"{_trunc(args.get('message', ''), 64)}\"  {dur}")
     if tool_name == "cronjob":
         action = args.get("action", "?")
         if action == "create":
             skills = args.get("skills") or ([] if not args.get("skill") else [args.get("skill")])
             label = args.get("name") or (skills[0] if skills else None) or args.get("prompt", "task")
-            return _wrap(f"┊ ⏰ cron      create {_trunc(label, 24)}  {dur}")
+            return _wrap(f"┊ ⏰ cron      create {_trunc(label, 64)}  {dur}")
         if action == "list":
             return _wrap(f"┊ ⏰ cron      listing  {dur}")
         return _wrap(f"┊ ⏰ cron      {action} {args.get('job_id', '')}  {dur}")
     if tool_name == "execute_code":
         code = args.get("code", "")
         first_line = code.strip().split("\n")[0] if code.strip() else ""
-        return _wrap(f"┊ 🐍 exec      {_trunc(first_line, 35)}  {dur}")
+        return _wrap(f"┊ 🐍 exec      {_trunc(first_line, 64)}  {dur}")
     if tool_name == "delegate_task":
         tasks = args.get("tasks")
         if tasks and isinstance(tasks, list):
             return _wrap(f"┊ 🔀 delegate  {len(tasks)} parallel tasks  {dur}")
-        return _wrap(f"┊ 🔀 delegate  {_trunc(args.get('goal', ''), 35)}  {dur}")
+        return _wrap(f"┊ 🔀 delegate  {_trunc(args.get('goal', ''), 64)}  {dur}")
 
     preview = build_tool_preview(tool_name, args) or ""
-    return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")
+    return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 64)}  {dur}")
+
 
 
 # =========================================================================
