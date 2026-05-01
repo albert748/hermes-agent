@@ -487,6 +487,10 @@ export default function SessionsPage() {
     SessionSearchResult[] | null
   >(null);
   const [searching, setSearching] = useState(false);
+  /** Full session info for all sessions that match the current search query.
+   *  Populated by a bulk fetch when searchResults changes, so the global FTS5
+   *  results aren't clipped to the current pagination page. */
+  const [searchFilteredSessions, setSearchFilteredSessions] = useState<SessionInfo[]>([]);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
   const logScrollRef = useRef<HTMLPreElement | null>(null);
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -550,7 +554,7 @@ export default function SessionsPage() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [actionStatus?.lines]);
 
-  // Debounced FTS search
+  // Debounced FTS search — fires the global search on every keystroke.
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
@@ -573,6 +577,36 @@ export default function SessionsPage() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [search]);
+
+  // When global FTS5 search returns, load the full session info for every
+  // matched session so the result list isn't clipped to the current page.
+  useEffect(() => {
+    if (!searchResults || searchResults.length === 0) {
+      setSearchFilteredSessions([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getSessions(100_000, 0) // fetch all sessions so we can display every match
+      .then((resp) => {
+        if (cancelled) return;
+        // Preserve search-result order (most relevant first)
+        const ordered = new Map<string, SessionInfo>();
+        for (const s of resp.sessions) ordered.set(s.id, s);
+        const matched: SessionInfo[] = [];
+        for (const r of searchResults) {
+          const info = ordered.get(r.session_id);
+          if (info) matched.push(info);
+        }
+        setSearchFilteredSessions(matched);
+      })
+      .catch(() => {
+        if (!cancelled) setSearchFilteredSessions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [searchResults]);
 
   const sessionDelete = useConfirmDelete({
     onDelete: useCallback(
@@ -609,10 +643,10 @@ export default function SessionsPage() {
     }
   }
 
-  // When searching, filter sessions to those with FTS matches;
-  // when not searching, show all sessions
+  // When searching, show the globally-matched sessions (with full info);
+  // when not searching, show all sessions on the current page.
   const filtered = searchResults
-    ? sessions.filter((s) => snippetMap.has(s.id))
+    ? searchFilteredSessions
     : sessions;
 
   const platformEntries = status
