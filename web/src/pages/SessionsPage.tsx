@@ -822,6 +822,10 @@ export default function SessionsPage() {
     SessionSearchResult[] | null
   >(null);
   const [searching, setSearching] = useState(false);
+  /** Full session info for all sessions that match the current search query.
+   *  Populated by a bulk fetch when searchResults changes, so the global FTS5
+   *  results aren't clipped to the current pagination page. */
+  const [searchFilteredSessions, setSearchFilteredSessions] = useState<SessionInfo[]>([]);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const logScrollRef = useRef<HTMLPreElement | null>(null);
@@ -868,6 +872,7 @@ export default function SessionsPage() {
   const [pruneDays, setPruneDays] = useState("90");
   const [pruning, setPruning] = useState(false);
   const [importingSessions, setImportingSessions] = useState(false);
+  const [recentCollapsed, setRecentCollapsed] = useState(false);
   const { toast, showToast } = useToast();
   const { t } = useI18n();
   const { setAfterTitle, setEnd } = usePageHeader();
@@ -1246,7 +1251,7 @@ export default function SessionsPage() {
     clearSelection();
   }, [clearSelection, sessionCategory]);
 
-  // Debounced FTS search
+  // Debounced FTS search — fires the global search on every keystroke.
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
 
@@ -1272,6 +1277,36 @@ export default function SessionsPage() {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [search, sessionQueryOptions]);
+
+  // When global FTS5 search returns, load the full session info for every
+  // matched session so the result list isn't clipped to the current page.
+  useEffect(() => {
+    if (!searchResults || searchResults.length === 0) {
+      setSearchFilteredSessions([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .getSessions(100_000, 0) // fetch all sessions so we can display every match
+      .then((resp) => {
+        if (cancelled) return;
+        // Preserve search-result order (most relevant first)
+        const ordered = new Map<string, SessionInfo>();
+        for (const s of resp.sessions) ordered.set(s.id, s);
+        const matched: SessionInfo[] = [];
+        for (const r of searchResults) {
+          const info = ordered.get(r.session_id);
+          if (info) matched.push(info);
+        }
+        setSearchFilteredSessions(matched);
+      })
+      .catch(() => {
+        if (!cancelled) setSearchFilteredSessions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [searchResults]);
 
   const sessionDelete = useConfirmDelete({
     onDelete: useCallback(
@@ -1527,7 +1562,11 @@ export default function SessionsPage() {
     }
   }
 
-  const filtered = searchResults ?? sessions;
+  // When searching, show the globally-matched sessions (with full info);
+  // when not searching, show all sessions on the current page.
+  const filtered = searchResults
+    ? searchFilteredSessions
+    : sessions;
 
   const platformEntries = status
     ? Object.entries(status.gateway_platforms ?? {})
@@ -2112,61 +2151,64 @@ export default function SessionsPage() {
 
           {recentSessions.length > 0 && (
             <Card className="min-w-0 max-w-full overflow-hidden">
-              <CardHeader className="min-w-0">
+              <CardHeader
+                className="cursor-pointer hover:bg-secondary/30 transition-colors min-w-0"
+                onClick={() => setRecentCollapsed(!recentCollapsed)}
+              >
                 <div className="flex min-w-0 items-center gap-2">
+                  {recentCollapsed ? (
+                    <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  ) : (
+                    <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  )}
                   <Clock className="h-5 w-5 shrink-0 text-muted-foreground" />
                   <CardTitle className="min-w-0 truncate text-base">
                     {t.status.recentSessions}
                   </CardTitle>
+                  <Badge tone="outline" className="text-[10px] ml-auto">
+                    {recentSessions.length}
+                  </Badge>
                 </div>
               </CardHeader>
 
-              <CardContent className="grid min-w-0 gap-3">
-                {recentSessions.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex min-w-0 max-w-full flex-col gap-2 border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
-                  >
-                    <div className="flex min-w-0 flex-1 flex-col gap-1">
-                      <span
-                        className={`font-mondwest normal-case min-w-0 truncate text-sm ${s.title ? "font-medium" : "text-muted-foreground italic"}`}
-                      >
-                        {s.title ??
-                          (s.preview
-                            ? s.preview.slice(0, 60)
-                            : t.common.untitled)}
-                      </span>
-
-                      <span className="min-w-0 break-words text-xs text-muted-foreground">
-                        {s.model && (
-                          <>
-                            <span className="font-mono-ui">
-                              {s.model.split("/").pop()}
-                            </span>{" "}
-                            ·{" "}
-                          </>
-                        )}
-                        {s.message_count} {t.common.msgs} ·{" "}
-                        {timeAgo(s.last_active)}
-                      </span>
-
-                      {s.preview && s.title && (
-                        <p className="font-mondwest normal-case min-w-0 max-w-full text-xs leading-snug text-text-tertiary [overflow-wrap:anywhere]">
-                          {s.preview}
-                        </p>
-                      )}
-                    </div>
-
-                    <Badge
-                      tone="outline"
-                      className="shrink-0 self-start text-xs sm:self-center"
+              {!recentCollapsed && (
+                <CardContent className="grid min-w-0 gap-3">
+                  {recentSessions.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex min-w-0 max-w-full flex-col gap-2 border border-border p-3 sm:flex-row sm:items-center sm:justify-between"
                     >
-                      <Database className="mr-1 h-3 w-3" />
-                      {s.source ? sourceLabel(s.source) : "local"}
-                    </Badge>
-                  </div>
-                ))}
-              </CardContent>
+                      <div className="flex min-w-0 flex-1 flex-col gap-1">
+                        <span className="font-mondwest normal-case min-w-0 truncate text-sm font-medium">
+                          {s.title ?? t.common.untitled}
+                        </span>
+
+                        <span className="min-w-0 break-words text-xs text-muted-foreground">
+                          <span className="font-mono-ui">
+                            {(s.model ?? t.common.unknown).split("/").pop()}
+                          </span>{" "}
+                          · {s.message_count} {t.common.msgs} ·{" "}
+                          {timeAgo(s.last_active)}
+                        </span>
+
+                        {s.preview && (
+                          <p className="font-mondwest normal-case min-w-0 max-w-full text-xs leading-snug text-text-tertiary [overflow-wrap:anywhere]">
+                            {s.preview}
+                          </p>
+                        )}
+                      </div>
+
+                      <Badge
+                        tone="outline"
+                        className="shrink-0 self-start text-xs sm:self-center"
+                      >
+                        <Database className="mr-1 h-3 w-3" />
+                        {s.source ?? "local"}
+                      </Badge>
+                    </div>
+                  ))}
+                </CardContent>
+              )}
             </Card>
           )}
         </div>
