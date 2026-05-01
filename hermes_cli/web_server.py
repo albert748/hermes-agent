@@ -797,25 +797,29 @@ async def get_sessions(limit: int = 20, offset: int = 0):
 
 @app.get("/api/sessions/search")
 async def search_sessions(q: str = "", limit: int = 20):
-    """Full-text search across session message content using FTS5."""
+    """Full-text search across session message content (FTS5) and session titles (LIKE)."""
     if not q or not q.strip():
         return {"results": []}
     try:
         from hermes_state import SessionDB
         db = SessionDB()
         try:
+            import re
+            raw_q = q.strip()
+
+            # ── FTS5 message-content search ──────────────────────────
             # Auto-add prefix wildcards so partial words match
             # e.g. "nimb" → "nimb*" matches "nimby"
             # Preserve quoted phrases and existing wildcards as-is
-            import re
             terms = []
-            for token in re.findall(r'"[^"]*"|\S+', q.strip()):
+            for token in re.findall(r'"[^"]*"|\S+', raw_q):
                 if token.startswith('"') or token.endswith("*"):
                     terms.append(token)
                 else:
                     terms.append(token + "*")
             prefix_query = " ".join(terms)
             matches = db.search_messages(query=prefix_query, limit=limit)
+
             # Group by session_id — return unique sessions with their best snippet
             seen: dict = {}
             for m in matches:
@@ -829,7 +833,25 @@ async def search_sessions(q: str = "", limit: int = 20):
                         "model": m.get("model"),
                         "session_started": m.get("session_started"),
                     }
-            return {"results": list(seen.values())}
+
+            # ── Title search (LIKE) ──────────────────────────────────
+            title_matches = db.search_sessions_by_title(raw_q, limit=limit)
+            for row in title_matches:
+                sid = row["id"]
+                if sid in seen:
+                    continue  # already found via FTS5 — keep the message snippet
+                seen[sid] = {
+                    "session_id": sid,
+                    "snippet": f'Title: {row["title"]}',
+                    "role": None,
+                    "source": row["source"],
+                    "model": row["model"],
+                    "session_started": row["started_at"],
+                }
+
+            results = list(seen.values())
+            # Honour the overall limit (FTS5 + title may overfill).
+            return {"results": results[:limit]}
         finally:
             db.close()
     except Exception:

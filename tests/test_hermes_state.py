@@ -1065,6 +1065,35 @@ class TestCJKSearchFallback:
         assert len(results) == 1
         assert results[0]["source"] == "telegram"
 
+    def test_cjk_bigram_with_fts_wildcard_suffix(self, db):
+        """CJK LIKE fallback must strip trailing * added by web_server for
+        FTS5 prefix matching.  In SQL LIKE, * is a literal character — a
+        pattern like ``%通信*%`` never matches content containing ``通信``."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="今天讨论A2A通信协议的实现")
+        results = db.search_messages("通信*")
+        assert len(results) == 1
+        assert results[0]["session_id"] == "s1"
+
+    def test_cjk_single_char_with_fts_wildcard_suffix(self, db):
+        """Single CJK char + * suffix must also work in LIKE fallback."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="测试搜索功能")
+        results = db.search_messages("搜*")
+        assert len(results) == 1
+        assert results[0]["session_id"] == "s1"
+
+    def test_cjk_trigram_with_fts_wildcard_suffix(self, db):
+        """3+ CJK chars with * suffix should work via trigram FTS5 path
+        (trigram tokenizer supports prefix queries)."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="大别山项目进展顺利")
+        results = db.search_messages("大别山*")
+        assert len(results) == 1, (
+            f"CJK trigram query with * suffix should match via trigram path, "
+            f"got {len(results)} results"
+        )
+
 
 # =========================================================================
 # Session search and listing
@@ -1415,6 +1444,58 @@ class TestSessionTitle:
         session = db.get_session("s1")
         assert session["title"] == "Before End"
         assert session["ended_at"] is not None
+
+    def test_title_search_exact_match(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_title("s1", "Debugging OAuth flow")
+        db.create_session(session_id="s2", source="telegram")
+        db.set_session_title("s2", "Research paper summary")
+        db.create_session(session_id="s3", source="cli")  # no title
+        results = db.search_sessions_by_title("OAuth")
+        assert len(results) == 1
+        assert results[0]["id"] == "s1"
+        assert results[0]["title"] == "Debugging OAuth flow"
+
+    def test_title_search_substring_match(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_title("s1", "Fix memory overflow bug")
+        results = db.search_sessions_by_title("overflow")
+        assert len(results) == 1
+        assert results[0]["id"] == "s1"
+
+    def test_title_search_chinese(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_title("s1", "大别山项目部署方案")
+        db.create_session(session_id="s2", source="cli")
+        db.set_session_title("s2", "记忆断裂问题排查")
+        results = db.search_sessions_by_title("大别山")
+        assert len(results) == 1
+        assert results[0]["id"] == "s1"
+        results2 = db.search_sessions_by_title("记忆断裂")
+        assert len(results2) == 1
+        assert results2[0]["id"] == "s2"
+
+    def test_title_search_like_wildcards_escaped(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_title("s1", "100% completion achieved")
+        db.create_session(session_id="s2", source="cli")
+        db.set_session_title("s2", "100 percent done")
+        # % is escaped — only s1 should match
+        results = db.search_sessions_by_title("100%")
+        assert len(results) == 1
+        assert results[0]["id"] == "s1"
+
+    def test_title_search_no_match(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_title("s1", "Fix bug")
+        results = db.search_sessions_by_title("nonexistent")
+        assert len(results) == 0
+
+    def test_title_search_empty_query(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.set_session_title("s1", "Something")
+        assert db.search_sessions_by_title("") == []
+        assert db.search_sessions_by_title("   ") == []
 
 
 class TestSanitizeTitle:
