@@ -353,7 +353,13 @@ class MemoryManager:
                     "Memory provider '%s' prefetch failed (non-fatal): %s",
                     provider.name, e,
                 )
-        return "\n\n".join(parts)
+        merged = "\n\n".join(parts)
+        if merged:
+            logger.info(
+                "prefetch_all: %d provider(s) returned %d chars for query '%s'",
+                len(parts), len(merged), query[:100],
+            )
+        return merged
 
     def queue_prefetch_all(self, query: str, *, session_id: str = "") -> None:
         """Queue background prefetch on all providers for the next turn."""
