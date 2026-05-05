@@ -11107,19 +11107,39 @@ class AIAgent:
             )
         elif function_name == "memory":
             target = function_args.get("target", "memory")
+            action = function_args.get("action", "")
             from tools.memory_tool import memory_tool as _memory_tool
+
+            # ── Intercept remove: save pre-removal state ──
+            if action == "remove":
+                try:
+                    import time
+                    from pathlib import Path as _Path
+                    _hermes_mem_dir = _Path(self._memory_store._path_for(target))
+                    if _hermes_mem_dir.exists():
+                        _backup_dir = _Path(
+                            (self._memory_store._path_for(target)).parent.parent
+                        ) / "memory_store" / "backups"
+                        _backup_dir.mkdir(parents=True, exist_ok=True)
+                        _ts = time.strftime("%Y%m%d_%H%M%S")
+                        _content = _hermes_mem_dir.read_text(encoding="utf-8")
+                        _backup_path = _backup_dir / f"{_hermes_mem_dir.stem}.{_ts}.preremove.bak"
+                        _backup_path.write_text(_content, encoding="utf-8")
+                except Exception:
+                    pass
+
             result = _memory_tool(
-                action=function_args.get("action"),
+                action=action,
                 target=target,
                 content=function_args.get("content"),
                 old_text=function_args.get("old_text"),
                 store=self._memory_store,
             )
             # Bridge: notify external memory provider of built-in memory writes
-            if self._memory_manager and function_args.get("action") in {"add", "replace"}:
+            if self._memory_manager and action in ("add", "replace", "remove"):
                 try:
                     self._memory_manager.on_memory_write(
-                        function_args.get("action", ""),
+                        action,
                         target,
                         function_args.get("content", ""),
                         metadata=self._build_memory_write_metadata(
@@ -11743,19 +11763,39 @@ class AIAgent:
                     self._vprint(f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}")
             elif function_name == "memory":
                 target = function_args.get("target", "memory")
+                action = function_args.get("action", "")
                 from tools.memory_tool import memory_tool as _memory_tool
+
+                # ── Intercept remove: save pre-removal state ──
+                if action == "remove":
+                    try:
+                        import time as _time2
+                        from pathlib import Path as _Path2
+                        _hermes_mem_dir2 = _Path2(self._memory_store._path_for(target))
+                        if _hermes_mem_dir2.exists():
+                            _backup_dir2 = _Path2(
+                                (self._memory_store._path_for(target)).parent.parent
+                            ) / "memory_store" / "backups"
+                            _backup_dir2.mkdir(parents=True, exist_ok=True)
+                            _ts2 = _time2.strftime("%Y%m%d_%H%M%S")
+                            _content2 = _hermes_mem_dir2.read_text(encoding="utf-8")
+                            _backup_path2 = _backup_dir2 / f"{_hermes_mem_dir2.stem}.{_ts2}.preremove.bak"
+                            _backup_path2.write_text(_content2, encoding="utf-8")
+                    except Exception:
+                        pass
+
                 function_result = _memory_tool(
-                    action=function_args.get("action"),
+                    action=action,
                     target=target,
                     content=function_args.get("content"),
                     old_text=function_args.get("old_text"),
                     store=self._memory_store,
                 )
                 # Bridge: notify external memory provider of built-in memory writes
-                if self._memory_manager and function_args.get("action") in {"add", "replace"}:
+                if self._memory_manager and action in ("add", "replace", "remove"):
                     try:
                         self._memory_manager.on_memory_write(
-                            function_args.get("action", ""),
+                            action,
                             target,
                             function_args.get("content", ""),
                             metadata=self._build_memory_write_metadata(
