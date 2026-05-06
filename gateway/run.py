@@ -4115,6 +4115,30 @@ class GatewayRunner:
         
         if connected_count > 0:
             logger.info("Gateway running with %s platform(s)", connected_count)
+
+        # Initialize DeepSeek cache heartbeat (if enabled in config).
+        # The gateway uses a global heartbeat manager so all per-message
+        # AIAgent instances share the same session heartbeat state.
+        try:
+            from agent.deepseek_cache_heartbeat import SessionHeartbeatManager
+            _gw_cfg = _load_gateway_config()
+            _hb_cfg = (_gw_cfg.get("prompt_caching", {}) or {}).get("deepseek_heartbeat", {}) or {}
+            if isinstance(_hb_cfg, dict) and _hb_cfg.get("enabled", False):
+                import run_agent as _ra
+                _ra._global_heartbeat_manager = SessionHeartbeatManager(
+                    enabled=True,
+                    interval_seconds=float(_hb_cfg.get("interval_seconds", 300)),
+                    min_interval_seconds=float(_hb_cfg.get("min_interval_seconds", 60)),
+                    max_consecutive_misses=int(_hb_cfg.get("max_consecutive_misses", 10)),
+                    max_unreasonable_misses=int(_hb_cfg.get("max_unreasonable_misses", 3)),
+                    max_idle_seconds=float(_hb_cfg.get("max_idle_minutes", 180)) * 60,
+                )
+                _ra._global_heartbeat_manager.start(
+                    persist_path=_hermes_home / "data" / "heartbeat_sessions.json",
+                )
+                logger.info("DeepSeek cache heartbeat started (gateway mode)")
+        except Exception as _hb_exc:
+            logger.debug("DeepSeek heartbeat init skipped: %s", _hb_exc)
         
         # Build initial channel directory for send_message name resolution
         try:

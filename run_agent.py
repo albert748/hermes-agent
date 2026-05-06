@@ -160,6 +160,12 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.subdirectory_hints import SubdirectoryHintTracker
 from agent.prompt_caching import apply_anthropic_cache_control
+from agent.deepseek_cache_heartbeat import SessionHeartbeatManager
+
+# Global heartbeat manager — set by the gateway process at startup so all
+# per-message AIAgent instances share the same heartbeat state.  In CLI
+# mode this stays None and each agent manages its own heartbeat locally.
+_global_heartbeat_manager: Optional[SessionHeartbeatManager] = None
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, build_environment_hints, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS, GOOGLE_MODEL_OPERATIONAL_GUIDANCE, OPENAI_MODEL_EXECUTION_GUIDANCE
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.codex_responses_adapter import (
@@ -1521,6 +1527,48 @@ class AIAgent:
                 self._cache_ttl = _ttl
         except Exception:
             pass
+
+        # DeepSeek prompt cache heartbeat — auto-enabled for DeepSeek provider.
+        # Unlike Anthropic (which uses client-side cache_control markers),
+        # DeepSeek uses server-side automatic prefix caching with a ~5 minute
+        # TTL.  The heartbeat sends periodic keepalive requests with the same
+        # message prefix to maintain the cache across idle periods.
+        logger.info("Heartbeat: checking agent %s platform=%s provider=%r model=%r base_url=%r",
+                    session_id, self.platform, self.provider, self.model, self.base_url)
+        self._is_deepseek = (
+            (self.provider or "").strip().lower() == "deepseek"
+            or "deepseek" in (self.model or "").lower()
+            or base_url_host_matches(self.base_url or "", "api.deepseek.com")
+        )
+        if not self._is_deepseek:
+            logger.warning("Heartbeat: agent %s platform=%s provider=%r model=%r base_url=%r → NOT deepseek",
+                           session_id, self.platform, self.provider, self.model, self.base_url)
+        self._heartbeat_manager: Optional[SessionHeartbeatManager] = None
+        self._heartbeat_messages_prefix: Optional[List[Dict[str, Any]]] = None
+        if self._is_deepseek:
+            try:
+                # Gateway mode: use the shared global manager if set.
+                if _global_heartbeat_manager is not None:
+                    self._heartbeat_manager = _global_heartbeat_manager
+                    logger.info("Heartbeat: agent %s platform=%s provider=%s using global manager",
+                               session_id, self.platform, self.provider)
+                else:
+                    # CLI mode: create a local per-agent manager.
+                    from hermes_cli.config import load_config as _load_hb_cfg
+                    _hb_cfg = _load_hb_cfg().get("prompt_caching", {}).get("deepseek_heartbeat", {}) or {}
+                    _hb_enabled = bool(_hb_cfg.get("enabled", False))
+                    if _hb_enabled:
+                        self._heartbeat_manager = SessionHeartbeatManager(
+                            enabled=True,
+                            interval_seconds=float(_hb_cfg.get("interval_seconds", 300)),
+                            min_interval_seconds=float(_hb_cfg.get("min_interval_seconds", 60)),
+                            max_consecutive_misses=int(_hb_cfg.get("max_consecutive_misses", 10)),
+                            max_unreasonable_misses=int(_hb_cfg.get("max_unreasonable_misses", 3)),
+                            max_idle_seconds=float(_hb_cfg.get("max_idle_minutes", 180)) * 60,
+                        )
+                        self._heartbeat_manager.bind_agent(self)
+            except Exception:
+                pass
 
         # Iteration budget: the LLM is only notified when it actually exhausts
         # the iteration budget (api_call_count >= max_iterations).  At that
@@ -13014,6 +13062,14 @@ class AIAgent:
             # the OpenAI SDK. Sanitizing here prevents the 3-retry cycle.
             _sanitize_messages_surrogates(api_messages)
 
+            # Store api_messages for DeepSeek cache heartbeat (if enabled).
+            # The heartbeat re-uses this exact prefix to keep the server-side
+            # cache warm during idle periods.
+            if self._heartbeat_manager is not None and self._heartbeat_manager.enabled:
+                # Skip cron/batch sessions — heartbeat is only for interactive idle sessions.
+                if getattr(self, "platform", "") not in ("cron",):
+                    self._heartbeat_messages_prefix = copy.deepcopy(api_messages)
+
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
             approx_tokens = estimate_messages_tokens_rough(api_messages)
@@ -13698,6 +13754,38 @@ class AIAgent:
                         self.session_cache_read_tokens += canonical_usage.cache_read_tokens
                         self.session_cache_write_tokens += canonical_usage.cache_write_tokens
                         self.session_reasoning_tokens += canonical_usage.reasoning_tokens
+
+                        # Record API call for DeepSeek cache heartbeat.
+                        # The heartbeat re-sends the stored message prefix to
+                        # keep the server-side cache warm across idle periods.
+                        #
+                        # Use api_kwargs["messages"] (from transport pipeline)
+                        # as the canonical source — not _heartbeat_messages_prefix
+                        # which may be missing in Gateway-only code paths.
+                        # Skip non-interactive sessions (cron, batch).
+                        if (
+                            self._heartbeat_manager is not None
+                            and self._heartbeat_manager.enabled
+                            and getattr(self, "platform", "") not in ("cron",)
+                        ):
+                            _hb_msgs = (
+                                (api_kwargs or {}).get("messages")
+                                or self._heartbeat_messages_prefix
+                            )
+                            if _hb_msgs:
+                                self._heartbeat_manager.record_api_call(
+                                    session_id=self.session_id or "",
+                                    model=self.model or "",
+                                    base_url=self.base_url or "",
+                                    api_key=getattr(self, "api_key", "") or "",
+                                    api_messages=_hb_msgs,
+                                    api_kwargs=api_kwargs,
+                                    chat_key=f"{self.platform}:{getattr(self, '_chat_id', '')}" if self.platform and getattr(self, '_chat_id', '') else "",
+                                )
+
+                            else:
+                                logger.warning("Heartbeat: manager set but no messages for session=%s platform=%s",
+                                               self.session_id, self.platform)
 
                         # Log API call details for debugging/observability
                         _cache_pct = ""

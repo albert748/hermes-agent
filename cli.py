@@ -11503,6 +11503,14 @@ class HermesCLI:
             # finishes; reset on the next turn.
             self._prompt_start_time = time.time()
             self._prompt_duration = 0.0
+
+            # Pause DeepSeek cache heartbeat during active conversation.
+            # The real API calls will refresh the cache; heartbeat resumes
+            # after the conversation turn completes.
+            _hb = getattr(self.agent, '_heartbeat_manager', None)
+            if _hb is not None and _hb.enabled:
+                _hb.stop()
+
             agent_thread = threading.Thread(target=run_agent, daemon=True)
             agent_thread.start()
 
@@ -11584,6 +11592,12 @@ class HermesCLI:
             if self._prompt_start_time is not None:
                 self._prompt_duration = max(0.0, time.time() - self._prompt_start_time)
                 self._prompt_start_time = None
+
+            # Resume DeepSeek cache heartbeat — the conversation turn is over,
+            # the user is idle, and the cache prefix has been captured.
+            _hb = getattr(self.agent, '_heartbeat_manager', None)
+            if _hb is not None and _hb.enabled:
+                _hb.start()
 
             # Proactively clean up async clients whose event loop is dead.
             # The agent thread may have created AsyncOpenAI clients bound

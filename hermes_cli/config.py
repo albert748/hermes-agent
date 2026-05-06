@@ -820,6 +820,21 @@ DEFAULT_CONFIG = {
     # cache_ttl must be "5m" or "1h" (Anthropic-supported tiers); other values are ignored.
     "prompt_caching": {
         "cache_ttl": "5m",
+        "long_lived_prefix": True,
+        "long_lived_ttl": "1h",
+
+        # DeepSeek prompt cache heartbeat — sends periodic keepalive requests to
+        # maintain the server-side prefix cache across idle periods (default ~5 min
+        # TTL).  Only activates when provider/model is DeepSeek.  Disabled by
+        # default; set enabled=true to activate.
+        "deepseek_heartbeat": {
+            "enabled": False,
+            "interval_seconds": 300,
+            "min_interval_seconds": 60,
+            "max_consecutive_misses": 10,
+            "max_unreasonable_misses": 3,
+            "max_idle_minutes": 180,
+        },
     },
 
     # OpenRouter-specific settings.
