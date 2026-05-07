@@ -9140,6 +9140,18 @@ class GatewayRunner:
                 self._cleanup_agent_resources(_old_agent)
         self._evict_cached_agent(session_key)
 
+        # Evict the old session from the DeepSeek cache heartbeat so it
+        # doesn't keep pinging a dead session after /new.  (Without this,
+        # the heartbeat would continue until max_idle_minutes — up to 3 h.)
+        if old_entry and old_entry.session_id:
+            try:
+                import run_agent as _ra_hb
+                _hb_mgr = getattr(_ra_hb, '_global_heartbeat_manager', None)
+                if _hb_mgr is not None and _hb_mgr.enabled:
+                    _hb_mgr.stop_session(old_entry.session_id)
+            except Exception:
+                pass
+
         # Discard any /queue overflow for this session — /new is a
         # conversation-boundary operation, queued follow-ups from the
         # previous conversation must not bleed into the new one.

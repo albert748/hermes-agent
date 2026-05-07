@@ -295,6 +295,25 @@ class SessionHeartbeatManager:
         with self._lock:
             self._sessions.pop(session_id, None)
 
+    def stop_session(self, session_id: str) -> None:
+        """Permanently remove a session from heartbeat rotation and persist.
+
+        Called when the user issues /new — the old session is dead and
+        should never be pinged again.  Unlike ``pause_session``, this
+        also force-persists so the removal survives Gateway restarts.
+
+        Idempotent: safe to call for sessions that are not registered.
+        """
+        with self._lock:
+            if session_id in self._sessions:
+                logger.info(
+                    "Heartbeat: stopping heartbeat for session %s (/new)",
+                    session_id,
+                )
+                del self._sessions[session_id]
+                self._persist_dirty = True
+        self._persist_sessions(force=True)
+
     # ── Persistence ───────────────────────────────────────────────────────
 
     def _maybe_persist(self) -> None:

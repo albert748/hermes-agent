@@ -4867,6 +4867,14 @@ class HermesCLI:
             # Route agent status output through prompt_toolkit so ANSI escape
             # sequences aren't garbled by patch_stdout's StdoutProxy (#2262).
             self.agent._print_fn = _cprint
+            # Start DeepSeek cache heartbeat immediately — the heartbeat
+            # thread should run continuously across conversation turns.
+            # record_api_call() updates the timestamp after each real API
+            # call, so the heartbeat only fires during actual idle periods
+            # (including long tool calls like process wait).
+            _hb = getattr(self.agent, '_heartbeat_manager', None)
+            if _hb is not None and _hb.enabled:
+                _hb.start()
             self._active_agent_route_signature = (
                 effective_model,
                 runtime.get("provider"),
@@ -6274,6 +6282,17 @@ class HermesCLI:
                 self._session_db.end_session(old_session_id, "new_session")
             except Exception:
                 pass
+
+        # Evict the old session from the DeepSeek cache heartbeat so it
+        # doesn't keep pinging a dead session after /new.  (Without this,
+        # the heartbeat would continue until max_idle_minutes — up to 3 h.)
+        if old_session_id and hasattr(self, 'agent') and self.agent is not None:
+            _hbm = getattr(self.agent, '_heartbeat_manager', None)
+            if _hbm is not None and _hbm.enabled:
+                try:
+                    _hbm.stop_session(old_session_id)
+                except Exception:
+                    pass
 
         self.session_start = datetime.now()
         timestamp_str = self.session_start.strftime("%Y%m%d_%H%M%S")
@@ -11255,6 +11274,16 @@ class HermesCLI:
 
         turn_route = self._resolve_turn_agent_config(message)
         if turn_route["signature"] != self._active_agent_route_signature:
+            # Stop the old heartbeat manager daemon thread before
+            # abandoning the agent.  Otherwise the old thread keeps
+            # pinging dead sessions alongside the new agent's manager.
+            if self.agent is not None:
+                _old_hb = getattr(self.agent, '_heartbeat_manager', None)
+                if _old_hb is not None and _old_hb.enabled:
+                    try:
+                        _old_hb.stop()
+                    except Exception:
+                        pass
             self.agent = None
 
         # Initialize agent if needed
@@ -11504,13 +11533,6 @@ class HermesCLI:
             self._prompt_start_time = time.time()
             self._prompt_duration = 0.0
 
-            # Pause DeepSeek cache heartbeat during active conversation.
-            # The real API calls will refresh the cache; heartbeat resumes
-            # after the conversation turn completes.
-            _hb = getattr(self.agent, '_heartbeat_manager', None)
-            if _hb is not None and _hb.enabled:
-                _hb.stop()
-
             agent_thread = threading.Thread(target=run_agent, daemon=True)
             agent_thread.start()
 
@@ -11592,12 +11614,6 @@ class HermesCLI:
             if self._prompt_start_time is not None:
                 self._prompt_duration = max(0.0, time.time() - self._prompt_start_time)
                 self._prompt_start_time = None
-
-            # Resume DeepSeek cache heartbeat — the conversation turn is over,
-            # the user is idle, and the cache prefix has been captured.
-            _hb = getattr(self.agent, '_heartbeat_manager', None)
-            if _hb is not None and _hb.enabled:
-                _hb.start()
 
             # Proactively clean up async clients whose event loop is dead.
             # The agent thread may have created AsyncOpenAI clients bound
