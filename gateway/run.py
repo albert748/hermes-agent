@@ -2242,6 +2242,12 @@ class GatewayRunner:
             )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
+        # Inject platform so AIAgent and heartbeat can track it — the
+        # _resolve_runtime_agent_kwargs helper only handles credentials,
+        # not session metadata.
+        if source is not None:
+            _plat = source.platform
+            runtime_kwargs["platform"] = _plat.value if hasattr(_plat, 'value') else str(_plat)
         runtime_model = runtime_kwargs.pop("model", None)
         if runtime_model:
             logger.info(

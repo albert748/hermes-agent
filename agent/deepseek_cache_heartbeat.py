@@ -67,6 +67,10 @@ class HeartbeatState:
     # etc.) so the server-side cache prefix matches perfectly.
     last_api_kwargs: Dict[str, Any] = field(default_factory=dict)
 
+    # Platform this session belongs to (e.g. "telegram", "cli", "discord").
+    # Stored here so heartbeat logs can include platform context.
+    platform: str = ""
+
     # Timing
     last_api_call_time: float = 0.0
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS
@@ -242,6 +246,7 @@ class SessionHeartbeatManager:
             state.model = model
             state.base_url = base_url
             state.api_key = api_key
+            state.platform = platform
 
             # Per-platform idle timeout: use the platform-specific config,
             # falling back to the global max_idle_seconds for unconfigured
@@ -375,6 +380,7 @@ class SessionHeartbeatManager:
                     "model": state.model,
                     "base_url": state.base_url,
                     "chat_key": state.chat_key,
+                    "platform": state.platform,
                     "interval_seconds": state.interval_seconds,
                     "last_api_wall_time": time.time() - (time.monotonic() - state.last_api_call_time),
                     "last_api_messages": state.last_api_messages,
@@ -444,6 +450,13 @@ class SessionHeartbeatManager:
             state.last_api_messages = sdata.get("last_api_messages", [])
             state.last_api_kwargs = sdata.get("last_api_kwargs", {})
             state.last_api_call_time = last_api_mono
+            state.platform = sdata.get("platform", "")
+            # Backfill platform from chat_key for sessions persisted before
+            # the platform field was added (chat_key format: "telegram:chatid").
+            if not state.platform and state.chat_key:
+                _parts = state.chat_key.split(":", 1)
+                if _parts and _parts[0]:
+                    state.platform = _parts[0]
             state.pings_sent = sdata.get("pings_sent", 0)
             state.cache_hits = sdata.get("cache_hits", 0)
             state.cache_misses = sdata.get("cache_misses", 0)
@@ -511,7 +524,7 @@ class SessionHeartbeatManager:
         with self._lock:
             session_count = len(self._sessions)
             if session_count == 0:
-                logger.warning("DeepSeek heartbeat _tick: 0 sessions registered — nothing to ping (is record_api_call called?)")
+                logger.debug("DeepSeek heartbeat _tick: 0 sessions registered — nothing to ping (is record_api_call called?)")
                 return
 
             for sid, state in list(self._sessions.items()):
@@ -541,17 +554,17 @@ class SessionHeartbeatManager:
                     to_ping.append(state)
 
             if to_ping:
-                logger.warning(
-                    "DeepSeek heartbeat _tick: %d session(s) to ping (total=%d, now=%.0f)",
-                    len(to_ping), session_count, now,
+                logger.info(
+                    "DeepSeek heartbeat _tick: %d session(s) to ping (total=%d)",
+                    len(to_ping), session_count,
                 )
             elif session_count > 0:
                 # Report state so we can see why no ping
                 for sid, state in list(self._sessions.items())[:3]:  # max 3 to avoid spam
                     idle = now - state.last_api_call_time
-                    logger.warning(
+                    logger.debug(
                         "DeepSeek heartbeat _tick: session %s idle=%.0fs interval=%.0fs → %s",
-                        sid[:12] if sid else "?", idle, state.interval_seconds,
+                        sid[:18] if sid else "?", idle, state.interval_seconds,
                         "NOT ready (idle < interval)" if idle < state.interval_seconds else "DISABLED" if state.disabled else "UNKNOWN",
                     )
 
@@ -561,9 +574,9 @@ class SessionHeartbeatManager:
     def _ping(self, state: HeartbeatState) -> None:
         """Send one heartbeat ping for a session."""
         try:
-            logger.warning(
+            logger.debug(
                 "DeepSeek heartbeat _ping: starting for session %s",
-                state.session_id[:12] if state.session_id else "?",
+                state.session_id[:18] if state.session_id else "?",
             )
             hb_messages = copy.deepcopy(state.last_api_messages)
             if not hb_messages:
@@ -623,12 +636,21 @@ class SessionHeartbeatManager:
                 # the heartbeat request itself refreshes the server-side
                 # cache TTL — the next ping should measure idle from NOW.
                 state.cache_hits += 1
-                state.last_api_call_time = time.monotonic()
+                _now = time.monotonic()
+                _idle_before = _now - state.last_api_call_time
+                _max_idle = (
+                    state.max_idle_seconds if state.max_idle_seconds > 0
+                    else self.max_idle_seconds
+                )
+                _remain = max(0, int((_max_idle - _idle_before) / 60))
+                state.last_api_call_time = _now
                 self._persist_dirty = True  # persist updated timestamp (v1.10 regression fix)
-                # TODO: once stable, demote to DEBUG
-                logger.warning(
-                    "DeepSeek heartbeat #%d → cache HIT (%d/%d tokens, intv=%ds) sid=%s %s",
-                    state.pings_sent, cache_hit_tokens, prompt_tokens, state.interval_seconds,
+                logger.info(
+                    "DeepSeek heartbeat #%d → cache HIT (%d/%d tokens, intv=%ds, remain=%dm) "
+                    "model=%s platform=%s sid=%s %s",
+                    state.pings_sent, cache_hit_tokens, prompt_tokens,
+                    int(state.interval_seconds), _remain,
+                    state.model, state.platform or "?",
                     state.session_id or "?",
                     f"chat={state.chat_key}" if state.chat_key else "",
                 )
@@ -649,12 +671,15 @@ class SessionHeartbeatManager:
                     state.unreasonable_misses += 1
                     logger.warning(
                         "DeepSeek heartbeat UNREASONABLE MISS #%d/%d "
-                        "(interval=%ds, idle=%ds, prompt=%d tokens)",
+                        "(interval=%ds, idle=%ds, prompt=%d tokens) "
+                        "model=%s platform=%s sid=%s",
                         state.unreasonable_misses,
                         self.max_unreasonable_misses,
-                        state.interval_seconds,
+                        int(state.interval_seconds),
                         int(idle_seconds),
                         prompt_tokens,
+                        state.model, state.platform or "?",
+                        state.session_id or "?",
                     )
 
                     if state.unreasonable_misses >= self.max_unreasonable_misses:
@@ -663,7 +688,7 @@ class SessionHeartbeatManager:
                             f"Unreasonable misses: {state.unreasonable_misses} misses "
                             f"despite interval={state.interval_seconds}s << idle={int(idle_seconds)}s"
                         )
-                        logger.error(
+                        logger.warning(
                             "DeepSeek heartbeat DISABLED for session %s: %s",
                             state.session_id, state.disabled_reason,
                         )
@@ -674,15 +699,23 @@ class SessionHeartbeatManager:
                         state.interval_seconds - 15,
                         self.min_interval_seconds,
                     )
-                    logger.warning(
+                    _sess_max_idle = (
+                        state.max_idle_seconds if state.max_idle_seconds > 0
+                        else self.max_idle_seconds
+                    )
+                    _remain = max(0, int((_sess_max_idle - idle_seconds) / 60))
+                    logger.info(
                         "DeepSeek heartbeat MISS #%d/%d → interval %ds→%ds "
-                        "(idle=%ds, prompt=%d tokens) sid=%s %s",
+                        "(idle=%ds, remain=%dm, prompt=%d tokens) "
+                        "model=%s platform=%s sid=%s %s",
                         state.consecutive_misses,
                         self.max_consecutive_misses,
                         int(old_interval),
                         int(state.interval_seconds),
                         int(idle_seconds),
+                        _remain,
                         prompt_tokens,
+                        state.model, state.platform or "?",
                         state.session_id or "?",
                         f"chat={state.chat_key}" if state.chat_key else "",
                     )
@@ -693,7 +726,7 @@ class SessionHeartbeatManager:
                             f"Consecutive misses: {state.consecutive_misses} misses, "
                             f"interval reduced to {state.interval_seconds}s"
                         )
-                        logger.error(
+                        logger.warning(
                             "DeepSeek heartbeat DISABLED for session %s: %s",
                             state.session_id, state.disabled_reason,
                         )
