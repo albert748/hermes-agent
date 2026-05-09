@@ -4132,6 +4132,7 @@ class GatewayRunner:
                     max_consecutive_misses=int(_hb_cfg.get("max_consecutive_misses", 10)),
                     max_unreasonable_misses=int(_hb_cfg.get("max_unreasonable_misses", 3)),
                     max_idle_seconds=float(_hb_cfg.get("max_idle_minutes", 180)) * 60,
+                    platform_max_idle_minutes=_hb_cfg.get("platform_max_idle_minutes"),
                 )
                 _ra._global_heartbeat_manager.start(
                     persist_path=_hermes_home / "data" / "heartbeat_sessions.json",

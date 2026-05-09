@@ -70,6 +70,11 @@ class HeartbeatState:
     # Timing
     last_api_call_time: float = 0.0
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS
+    # Per-session idle timeout (seconds).  Set from platform_max_idle_minutes
+    # config when session is registered.  The global manager.max_idle_seconds
+    # is only used as a fallback for sessions registered before this field
+    # existed (e.g. restored from older persist files).
+    max_idle_seconds: float = 0.0
 
     # Miss tracking
     consecutive_misses: int = 0
@@ -107,6 +112,7 @@ class SessionHeartbeatManager:
         max_consecutive_misses: int = DEFAULT_MAX_CONSECUTIVE_MISSES,
         max_unreasonable_misses: int = DEFAULT_MAX_UNREASONABLE_MISSES,
         max_idle_seconds: float = DEFAULT_MAX_IDLE_MINUTES * 60,
+        platform_max_idle_minutes: Optional[Dict[str, float]] = None,
     ):
         self.enabled = enabled
         self.interval_seconds = interval_seconds
@@ -114,6 +120,13 @@ class SessionHeartbeatManager:
         self.max_consecutive_misses = max_consecutive_misses
         self.max_unreasonable_misses = max_unreasonable_misses
         self.max_idle_seconds = max_idle_seconds
+        # Per-platform idle timeout overrides: platform_name → seconds
+        # Falls back to self.max_idle_seconds when platform not found.
+        self._platform_max_idle_seconds: Dict[str, float] = {}
+        if platform_max_idle_minutes:
+            self._platform_max_idle_seconds = {
+                k: v * 60 for k, v in platform_max_idle_minutes.items() if v > 0
+            }
 
         # session_id → HeartbeatState
         self._sessions: Dict[str, HeartbeatState] = {}
@@ -157,6 +170,7 @@ class SessionHeartbeatManager:
         api_messages: List[Dict[str, Any]],
         api_kwargs: Optional[Dict[str, Any]] = None,
         chat_key: str = "",
+        platform: str = "",
     ) -> None:
         """Record a successful API call for a session.
 
@@ -171,6 +185,10 @@ class SessionHeartbeatManager:
         chat_key, the old session(s) for that chat are evicted.  This
         handles /new (new session replaces old) and prevents dead sessions
         from consuming heartbeat pings.
+
+        *platform* sets the per-session ``max_idle_seconds`` from the
+        ``platform_max_idle_minutes`` config.  Falls back to the global
+        ``max_idle_seconds`` for unconfigured platforms.
         """
         if not self.enabled:
             return
@@ -224,6 +242,17 @@ class SessionHeartbeatManager:
             state.model = model
             state.base_url = base_url
             state.api_key = api_key
+
+            # Per-platform idle timeout: use the platform-specific config,
+            # falling back to the global max_idle_seconds for unconfigured
+            # or unknown platforms.
+            if platform:
+                state.max_idle_seconds = self._platform_max_idle_seconds.get(
+                    platform, self.max_idle_seconds,
+                )
+            elif state.max_idle_seconds <= 0:
+                # Backfill for sessions created before per-session timeout
+                state.max_idle_seconds = self.max_idle_seconds
 
             self._persist_dirty = True
 
@@ -353,6 +382,7 @@ class SessionHeartbeatManager:
                     "pings_sent": state.pings_sent,
                     "cache_hits": state.cache_hits,
                     "cache_misses": state.cache_misses,
+                    "max_idle_seconds": state.max_idle_seconds,
                 })
 
         data = {"sessions": sessions_data, "updated_at": time.time()}
@@ -417,6 +447,7 @@ class SessionHeartbeatManager:
             state.pings_sent = sdata.get("pings_sent", 0)
             state.cache_hits = sdata.get("cache_hits", 0)
             state.cache_misses = sdata.get("cache_misses", 0)
+            state.max_idle_seconds = sdata.get("max_idle_seconds", 0.0)
             self._sessions[sid] = state
             restored += 1
 
@@ -489,8 +520,15 @@ class SessionHeartbeatManager:
 
                 idle = now - state.last_api_call_time
 
-                # Stop heartbeat after max_idle_seconds
-                if idle >= self.max_idle_seconds:
+                # Per-session idle timeout: use the session-specific value
+                # (set from platform_max_idle_minutes config), falling back
+                # to the global max_idle_seconds for older sessions.
+                sess_max_idle = (
+                    state.max_idle_seconds
+                    if state.max_idle_seconds > 0
+                    else self.max_idle_seconds
+                )
+                if idle >= sess_max_idle:
                     logger.debug(
                         "DeepSeek heartbeat: session %s idle %.0f min — removing",
                         sid, idle / 60,

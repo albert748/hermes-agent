@@ -834,6 +834,31 @@ DEFAULT_CONFIG = {
             "max_consecutive_misses": 10,
             "max_unreasonable_misses": 3,
             "max_idle_minutes": 180,
+            # Per-platform max idle minutes overrides.  Platforms not listed
+            # here fall back to the global "max_idle_minutes" above.
+            # Set to 0 to disable heartbeat for a specific platform entirely.
+            "platform_max_idle_minutes": {
+                "cli": 180,
+                "telegram": 360,
+                "discord": 60,
+                "api_server": 60,
+                "email": 60,
+                "webhook": 60,
+                "whatsapp": 60,
+                "slack": 60,
+                "signal": 60,
+                "mattermost": 60,
+                "matrix": 60,
+                "sms": 60,
+                "dingtalk": 60,
+                "feishu": 60,
+                "wecom": 60,
+                "weixin": 60,
+                "bluebubbles": 60,
+                "qqbot": 60,
+                "yuanbao": 60,
+                "tui": 60,
+            },
         },
     },
 
