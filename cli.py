@@ -4638,6 +4638,15 @@ class HermesCLI:
         # AIAgent/OpenAI client holds auth at init time, so rebuild if key,
         # routing, or the effective model changed.
         if (credentials_changed or routing_changed or model_changed) and self.agent is not None:
+            # Stop DeepSeek heartbeat before abandoning the agent.
+            # Otherwise the daemon thread leaks and shows "0 sessions"
+            # forever alongside the new agent's heartbeat manager.
+            _old_hb = getattr(self.agent, '_heartbeat_manager', None)
+            if _old_hb is not None and _old_hb.enabled:
+                try:
+                    _old_hb.stop()
+                except Exception:
+                    pass
             self.agent = None
             self._active_agent_route_signature = None
 
@@ -7682,6 +7691,14 @@ class HermesCLI:
             
             if personality_name in {"none", "default", "neutral"}:
                 self.system_prompt = ""
+                # Stop DeepSeek heartbeat before abandoning the old agent.
+                if self.agent is not None:
+                    _old_hb = getattr(self.agent, '_heartbeat_manager', None)
+                    if _old_hb is not None and _old_hb.enabled:
+                        try:
+                            _old_hb.stop()
+                        except Exception:
+                            pass
                 self.agent = None  # Force re-init
                 if save_config_value("agent.system_prompt", ""):
                     print("(^_^)b Personality cleared (saved to config)")
@@ -7690,6 +7707,14 @@ class HermesCLI:
                 print("  No personality overlay — using base agent behavior.")
             elif personality_name in self.personalities:
                 self.system_prompt = self._resolve_personality_prompt(self.personalities[personality_name])
+                # Stop DeepSeek heartbeat before abandoning the old agent.
+                if self.agent is not None:
+                    _old_hb = getattr(self.agent, '_heartbeat_manager', None)
+                    if _old_hb is not None and _old_hb.enabled:
+                        try:
+                            _old_hb.stop()
+                        except Exception:
+                            pass
                 self.agent = None  # Force re-init
                 if save_config_value("agent.system_prompt", self.system_prompt):
                     print(f"(^_^)b Personality set to '{personality_name}' (saved to config)")
@@ -9454,6 +9479,14 @@ class HermesCLI:
             return
 
         self.reasoning_config = parsed
+        # Stop DeepSeek heartbeat before abandoning the old agent.
+        if self.agent is not None:
+            _old_hb = getattr(self.agent, '_heartbeat_manager', None)
+            if _old_hb is not None and _old_hb.enabled:
+                try:
+                    _old_hb.stop()
+                except Exception:
+                    pass
         self.agent = None  # Force agent re-init with new reasoning config
 
         if save_config_value("agent.reasoning_effort", arg):
@@ -9540,6 +9573,14 @@ class HermesCLI:
             _cprint(f"  {_DIM}Usage: /fast [normal|fast|status]{_RST}")
             return
 
+        # Stop DeepSeek heartbeat before abandoning the old agent.
+        if self.agent is not None:
+            _old_hb = getattr(self.agent, '_heartbeat_manager', None)
+            if _old_hb is not None and _old_hb.enabled:
+                try:
+                    _old_hb.stop()
+                except Exception:
+                    pass
         self.agent = None  # Force agent re-init with new service-tier config
         if save_config_value("agent.service_tier", saved_value):
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (saved to config){_RST}")
