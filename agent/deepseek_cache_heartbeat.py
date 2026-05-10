@@ -73,6 +73,10 @@ class HeartbeatState:
 
     # Timing
     last_api_call_time: float = 0.0
+    # Timestamp of the last USER-initiated API call (not heartbeat ping).
+    # Used for max_idle timeout — only set by record_api_call(), never by _ping().
+    # Falls back to last_api_call_time if 0 (backward compat / restore from old persist).
+    last_user_call_time: float = 0.0
     interval_seconds: float = DEFAULT_INTERVAL_SECONDS
     # Per-session idle timeout (seconds).  Set from platform_max_idle_minutes
     # config when session is registered.  The global manager.max_idle_seconds
@@ -202,6 +206,22 @@ class SessionHeartbeatManager:
             # Evict old sessions for the same chat (e.g. /new).
             # Two-pass: first backfill chat_key on sessions created
             # before this feature existed, then evict all matches.
+            #
+            # If the caller didn't provide chat_key (TG adapter sometimes
+            # doesn't have _chat_id at record time), try to inherit it from
+            # an existing session for the same platform+model+base_url so
+            # eviction still works and we don't accumulate duplicate sessions.
+            if not chat_key and platform:
+                for st in self._sessions.values():
+                    if (
+                        st.chat_key
+                        and st.model == model
+                        and st.base_url == base_url
+                        and st.platform == platform
+                    ):
+                        chat_key = st.chat_key
+                        break
+
             if chat_key:
                 # Pass 1: backfill — update chat_key on sessions that
                 # don't have one yet but share the same model/base_url.
@@ -239,6 +259,7 @@ class SessionHeartbeatManager:
 
             state.last_api_messages = copy.deepcopy(api_messages)
             state.last_api_call_time = now
+            state.last_user_call_time = now  # real user API call resets the idle clock
             if api_kwargs:
                 _safe_kwargs = {k: v for k, v in api_kwargs.items()
                                 if k not in ("api_key", "api_secret")}
@@ -383,6 +404,11 @@ class SessionHeartbeatManager:
                     "platform": state.platform,
                     "interval_seconds": state.interval_seconds,
                     "last_api_wall_time": time.time() - (time.monotonic() - state.last_api_call_time),
+                    "last_user_wall_time": (
+                        time.time() - (time.monotonic() - state.last_user_call_time)
+                        if state.last_user_call_time > 0
+                        else None
+                    ),
                     "last_api_messages": state.last_api_messages,
                     "last_api_kwargs": state.last_api_kwargs,
                     "pings_sent": state.pings_sent,
@@ -450,6 +476,12 @@ class SessionHeartbeatManager:
             state.last_api_messages = sdata.get("last_api_messages", [])
             state.last_api_kwargs = sdata.get("last_api_kwargs", {})
             state.last_api_call_time = last_api_mono
+            # Restore last_user_call_time.  New persist files include
+            # last_user_wall_time; old persist files don't — fall back
+            # to last_api_call_time (0-value triggers backfill in _tick / _ping).
+            _lu_wall = sdata.get("last_user_wall_time")
+            if _lu_wall is not None and _lu_wall > 0:
+                state.last_user_call_time = max(0, _lu_wall - mono_offset)
             state.platform = sdata.get("platform", "")
             # Backfill platform from chat_key for sessions persisted before
             # the platform field was added (chat_key format: "telegram:chatid").
@@ -533,6 +565,15 @@ class SessionHeartbeatManager:
 
                 idle = now - state.last_api_call_time
 
+                # Real idle: time since last REAL API call (not heartbeat ping).
+                # Falls back to last_api_call_time for sessions created before
+                # last_user_call_time existed (backward compat / old persist).
+                real_idle = now - (
+                    state.last_user_call_time
+                    if state.last_user_call_time > 0
+                    else state.last_api_call_time
+                )
+
                 # Per-session idle timeout: use the session-specific value
                 # (set from platform_max_idle_minutes config), falling back
                 # to the global max_idle_seconds for older sessions.
@@ -541,10 +582,10 @@ class SessionHeartbeatManager:
                     if state.max_idle_seconds > 0
                     else self.max_idle_seconds
                 )
-                if idle >= sess_max_idle:
+                if real_idle >= sess_max_idle:
                     logger.debug(
-                        "DeepSeek heartbeat: session %s idle %.0f min — removing",
-                        sid, idle / 60,
+                        "DeepSeek heartbeat: session %s real-idle %.0f min — removing",
+                        sid, real_idle / 60,
                     )
                     del self._sessions[sid]
                     continue
@@ -635,6 +676,9 @@ class SessionHeartbeatManager:
                 # Cache hit — all good.  Update last_api_call_time because
                 # the heartbeat request itself refreshes the server-side
                 # cache TTL — the next ping should measure idle from NOW.
+                # Do NOT update last_user_call_time — that is reserved for
+                # real user API calls (record_api_call) so max_idle counts down
+                # correctly and eventually expires idle sessions.
                 state.cache_hits += 1
                 _now = time.monotonic()
                 _idle_before = _now - state.last_api_call_time
@@ -642,7 +686,15 @@ class SessionHeartbeatManager:
                     state.max_idle_seconds if state.max_idle_seconds > 0
                     else self.max_idle_seconds
                 )
-                _remain = max(0, int((_max_idle - _idle_before) / 60))
+                # Compute remain from the REAL idle (not heartbeat idle) so it
+                # actually decreases toward 0 as the session ages.
+                _real_last = (
+                    state.last_user_call_time
+                    if state.last_user_call_time > 0
+                    else state.last_api_call_time
+                )
+                _real_idle = _now - _real_last
+                _remain = max(0, int((_max_idle - _real_idle) / 60))
                 state.last_api_call_time = _now
                 self._persist_dirty = True  # persist updated timestamp (v1.10 regression fix)
                 logger.info(
@@ -703,7 +755,15 @@ class SessionHeartbeatManager:
                         state.max_idle_seconds if state.max_idle_seconds > 0
                         else self.max_idle_seconds
                     )
-                    _remain = max(0, int((_sess_max_idle - idle_seconds) / 60))
+                    # Compute remain from REAL idle (not heartbeat idle),
+                    # same as HIT path: last_user_call_time is never
+                    # updated by heartbeat pings.
+                    _real_last = (
+                        state.last_user_call_time
+                        if state.last_user_call_time > 0
+                        else state.last_api_call_time
+                    )
+                    _remain = max(0, int((_sess_max_idle - (now - _real_last)) / 60))
                     logger.info(
                         "DeepSeek heartbeat MISS #%d/%d → interval %ds→%ds "
                         "(idle=%ds, remain=%dm, prompt=%d tokens) "

@@ -632,3 +632,139 @@ class TestSessionHeartbeatManager:
             ]
         finally:
             persist_path.unlink(missing_ok=True)
+
+    # ── Regression: last_user_call_time (2026-05-10) ──────────────────────
+
+    def test_remain_reflects_real_idle_not_heartbeat_idle(self):
+        """remain must decrease toward 0 as the session ages, NOT stay constant.
+
+        Bug: heartbeat ping resets last_api_call_time, so _idle_before is always
+        ≈ interval_seconds, making remain = (max_idle - interval)/60 a constant.
+
+        Fix: compute remain from last_user_call_time (only set by record_api_call,
+        never by heartbeat pings), so it truly counts down as the session ages.
+        """
+        mgr = SessionHeartbeatManager(enabled=True, max_idle_seconds=30)
+        mock_client = _make_client(_make_response(
+            cache_hit_tokens=10000, prompt_tokens=12000,
+        ))
+
+        # Simulate a session whose last real API call was almost at max_idle
+        state = HeartbeatState(
+            session_id="s1",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            last_api_messages=[{"role": "system", "content": "test"}],
+            last_api_call_time=time.monotonic() - 5,  # heartbeat idle: 5s
+            last_user_call_time=time.monotonic() - 28,  # real idle: 28s (near 30s max)
+            interval_seconds=10,
+            max_idle_seconds=30,
+        )
+        mgr._get_client = lambda s: mock_client
+        mgr._sessions["s1"] = state
+
+        mgr._ping(state)
+
+        # Hard assertion: last_user_call_time must NOT have been updated by _ping()
+        assert state.last_user_call_time < state.last_api_call_time, (
+            f"BUG: heartbeat ping reset last_user_call_time "
+            f"({state.last_user_call_time:.1f}) to or past "
+            f"last_api_call_time ({state.last_api_call_time:.1f}). "
+            f"Heartbeat pings must NOT reset the user call clock."
+        )
+
+    def test_max_idle_timeout_after_successful_heartbeats(self):
+        """Successful heartbeat pings must NOT prevent max_idle timeout.
+
+        Bug: heartbeat ping resets last_api_call_time, so _tick() always sees
+        idle ≈ interval_seconds << max_idle, and the session never expires.
+
+        Fix: _tick() uses last_user_call_time for the timeout check, which is
+        never touched by _ping().
+        """
+        mgr = SessionHeartbeatManager(
+            enabled=True,
+            max_idle_seconds=0.1,
+            min_interval_seconds=0.01,
+            interval_seconds=0.05,
+        )
+        mock_client = _make_client(_make_response(
+            cache_hit_tokens=10000, prompt_tokens=12000,
+        ))
+
+        state = HeartbeatState(
+            session_id="s1",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            last_api_messages=[{"role": "system", "content": "test"}],
+            last_api_call_time=time.monotonic(),
+            last_user_call_time=time.monotonic(),
+            interval_seconds=0.05,
+            max_idle_seconds=0.1,
+        )
+        mgr._get_client = lambda s: mock_client
+        mgr._sessions["s1"] = state
+
+        # Fire a successful heartbeat ping (old code resets last_api_call_time
+        # which also serves as the max_idle clock).
+        mgr._ping(state)
+        assert state.cache_hits == 1
+
+        # Wait for max_idle (0.1s) to expire from last_user_call_time
+        time.sleep(0.15)
+
+        # Run _tick() — must remove the session because real idle > max_idle
+        mgr._tick()
+
+        assert "s1" not in mgr._sessions, (
+            "BUG: session survived beyond max_idle despite being idle. "
+            "Heartbeat pings must NOT reset the max_idle clock. "
+            f"idle from last_user_call_time = {time.monotonic() - state.last_user_call_time:.2f}s, "
+            f"max_idle = 0.1s"
+        )
+
+    def test_record_api_call_inherits_chat_key_when_missing(self):
+        """When chat_key is empty but a sibling session for the same
+        platform+model+base_url already has one, inherit it so eviction works.
+
+        Regression: if TG adapter fails to pass chat_key on a subsequent
+        message, the new session would coexist with the old one, causing
+        duplicate heartbeat pings for the same chat.
+        """
+        mgr = SessionHeartbeatManager(enabled=True)
+
+        # First session: has chat_key
+        mgr.record_api_call(
+            session_id="s1",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            api_messages=[{"role": "system", "content": "msg1"}],
+            chat_key="telegram:8211517881",
+            platform="telegram",
+        )
+        assert len(mgr._sessions) == 1
+        assert mgr._sessions["s1"].chat_key == "telegram:8211517881"
+
+        # Second session: chat_key missing (TG adapter bug)
+        mgr.record_api_call(
+            session_id="s2",
+            model="deepseek-v4-flash",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            api_messages=[{"role": "system", "content": "msg2"}],
+            chat_key="",           # <-- missing!
+            platform="telegram",
+        )
+
+        # Old session should be evicted, new session inherits chat_key
+        assert "s1" not in mgr._sessions, (
+            "BUG: old session 's1' should be evicted when new session 's2' "
+            "inherits its chat_key"
+        )
+        assert len(mgr._sessions) == 1
+        assert mgr._sessions["s2"].chat_key == "telegram:8211517881", (
+            "BUG: new session 's2' should inherit chat_key from evicted 's1'"
+        )
