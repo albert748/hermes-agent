@@ -553,6 +553,10 @@ class EmailAdapter(BasePlatformAdapter):
         self._seen_uids_max: int = 2000   # cap to prevent unbounded memory growth
         self._poll_task: Optional[asyncio.Task] = None
 
+        # Suppress repeated log spam for senders we've already logged as skipped/dropped
+        self._logged_skipped_senders: set = set()
+        self._logged_dropped_senders: set = set()
+
         # Map chat_id (sender email) -> last subject + message-id for threading
         self._thread_context: Dict[str, Dict[str, str]] = {}
 
@@ -779,7 +783,9 @@ class EmailAdapter(BasePlatformAdapter):
                     # Skip automated/noreply senders before any processing
                     msg_headers = dict(msg.items())
                     if _is_automated_sender(sender_addr, msg_headers):
-                        logger.debug("[Email] Skipping automated sender: %s", sender_addr)
+                        if sender_addr not in self._logged_skipped_senders:
+                            self._logged_skipped_senders.add(sender_addr)
+                            logger.debug("[Email] Skipping automated sender: %s", sender_addr)
                         continue
 
                     # Verify the From: domain is authenticated (SPF/DKIM/DMARC)
@@ -857,7 +863,9 @@ class EmailAdapter(BasePlatformAdapter):
 
         # Never reply to automated senders
         if _is_automated_sender(sender_addr, {}):
-            logger.debug("[Email] Dropping automated sender at dispatch: %s", sender_addr)
+            if sender_addr not in self._logged_dropped_senders:
+                self._logged_dropped_senders.add(sender_addr)
+                logger.debug("[Email] Dropping automated sender at dispatch: %s", sender_addr)
             return
 
         # Skip senders not in EMAIL_ALLOWED_USERS — prevents the adapter
@@ -879,7 +887,9 @@ class EmailAdapter(BasePlatformAdapter):
         else:
             allowed = {addr.strip().lower() for addr in allowed_raw.split(",") if addr.strip()}
             if sender_addr.lower() not in allowed:
-                logger.debug("[Email] Dropping non-allowlisted sender at dispatch: %s", sender_addr)
+                if sender_addr not in self._logged_dropped_senders:
+                    self._logged_dropped_senders.add(sender_addr)
+                    logger.debug("[Email] Dropping non-allowlisted sender at dispatch: %s", sender_addr)
                 return
 
         # Reject spoofed senders. The allowlist (and the gateway's own authz)
