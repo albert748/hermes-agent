@@ -5158,6 +5158,17 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         self.user_message_preview_first_lines = max(1, _ump_first_lines)
         self.user_message_preview_last_lines = max(0, _ump_last_lines)
 
+        # ── CLI idle notification config ─────────────────────────────
+        _idle_cfg = CLI_CONFIG.get("cli", {}).get("idle_notification", {})
+        self._idle_notif_enabled = bool(_idle_cfg.get("enabled", False))
+        self._idle_notif_timeout = int(_idle_cfg.get("timeout", 300))
+        self._idle_notif_max_chars = int(_idle_cfg.get("max_summary_chars", 1000))
+        self._idle_notif_platforms = list(_idle_cfg.get("platforms", []))
+        # Runtime state (reset per notification cycle)
+        self._idle_notif_start_time = 0.0
+        self._idle_notif_sent = False
+        self._last_assistant_response = ""
+
         # Streaming display state
         self._stream_buf = ""        # Partial line buffer for line-buffered rendering
         self._stream_started = False  # True once first delta arrives
@@ -17627,6 +17638,61 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             ] if item is not None
         ]
 
+    def _send_idle_notification(self):
+        """Send idle timeout notification to configured messaging platforms.
+
+        Called from process_loop's idle branch when the agent finished
+        responding more than ``_idle_notif_timeout`` seconds ago and the
+        user hasn't replied.
+        """
+        if not self._idle_notif_platforms:
+            return
+
+        summary = self._last_assistant_response
+        max_chars = max(100, self._idle_notif_max_chars)
+        if len(summary) > max_chars:
+            summary = summary[:max_chars] + "…"
+
+        elapsed_min = (time.time() - self._idle_notif_start_time) / 60
+        message = (
+            f"✅ CLI 任务完成，你已离开约 {elapsed_min:.0f} 分钟\n\n"
+            f"结果摘要：\n{summary}"
+        )
+
+        import json
+        from tools.send_message_tool import send_message_tool
+
+        any_succeeded = False
+        for platform in self._idle_notif_platforms:
+            if platform == "telegram":
+                continue
+            try:
+                result_json = send_message_tool({
+                    "action": "send",
+                    "target": platform,
+                    "message": message,
+                })
+                result = json.loads(result_json) if isinstance(result_json, str) else {}
+                if result.get("error"):
+                    logger.warning(
+                        "Idle notification to '%s' failed: %s",
+                        platform, result["error"],
+                    )
+                else:
+                    logger.info(
+                        "Idle notification sent to '%s': %s",
+                        platform,
+                        result.get("success", result.get("note", "ok")),
+                    )
+                    any_succeeded = True
+            except Exception:
+                logger.exception(
+                    "Idle notification to '%s' raised exception", platform
+                )
+
+        if any_succeeded:
+            self._idle_notif_sent = True
+
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
         if not self._claim_active_session("cli"):
@@ -20448,6 +20514,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     # Check for pending input with timeout
                     try:
                         user_input = self._pending_input.get(timeout=0.1)
+                        # ── Idle notification: user returned ──────────
+                        self._idle_notif_start_time = 0.0
+                        self._idle_notif_sent = False
                     except queue.Empty:
                         # Periodic config watcher — auto-reload MCP on mcp_servers change
                         if not self._agent_running:
@@ -20472,6 +20541,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                                 self._maybe_fire_loop_tick()
                             except Exception:
                                 pass
+                            # ── Idle notification: timeout check ──────
+                            if (self._idle_notif_enabled
+                                    and self._idle_notif_start_time > 0
+                                    and not self._idle_notif_sent
+                                    and time.time() - self._idle_notif_start_time > self._idle_notif_timeout):
+                                self._send_idle_notification()
                         continue
 
                     # Voice-transcribed messages arrive wrapped in a sentinel
@@ -20594,9 +20669,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     app.invalidate()  # Refresh status line
 
                     try:
-                        self.chat(user_input, images=submit_images or None, voice_input=is_voice_input)
+                        self._last_assistant_response = self.chat(user_input, images=submit_images or None, voice_input=is_voice_input) or ""
                     finally:
                         self._agent_running = False
+                        # ── Idle notification: start timer after agent finishes ──
+                        if self._idle_notif_enabled and self._last_assistant_response:
+                            self._idle_notif_start_time = time.time()
+                            self._idle_notif_sent = False
                         self._spinner_text = ""
                         self._tool_start_time = 0.0
                         self._pending_tool_info.clear()
