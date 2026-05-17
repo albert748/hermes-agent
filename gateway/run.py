@@ -9150,14 +9150,53 @@ class GatewayRunner:
         # Evict the old session from the DeepSeek cache heartbeat so it
         # doesn't keep pinging a dead session after /new.  (Without this,
         # the heartbeat would continue until max_idle_minutes — up to 3 h.)
+        logger.warning(
+            "Heartbeat diag: /new old_entry=%s old_entry.session_id=%s",
+            old_entry, old_entry.session_id if old_entry else 'N/A',
+        )
         if old_entry and old_entry.session_id:
             try:
                 import run_agent as _ra_hb
                 _hb_mgr = getattr(_ra_hb, '_global_heartbeat_manager', None)
+                logger.warning(
+                    "Heartbeat diag: /new _hb_mgr=%s enabled=%s",
+                    _hb_mgr is not None,
+                    _hb_mgr.enabled if _hb_mgr else 'N/A',
+                )
                 if _hb_mgr is not None and _hb_mgr.enabled:
+                    in_sessions = old_entry.session_id in _hb_mgr._sessions
+                    logger.warning(
+                        "Heartbeat diag: /new session_id=%s in_sessions=%s",
+                        old_entry.session_id, in_sessions,
+                    )
                     _hb_mgr.stop_session(old_entry.session_id)
-            except Exception:
-                pass
+            except Exception as _hb_diag_exc:
+                logger.warning(
+                    "Heartbeat diag: /new stop_session exception: %s",
+                    _hb_diag_exc, exc_info=True,
+                )
+
+        # Also evict ALL heartbeat sessions for this chat — old_entry
+        # might reference a session that was already evicted by a
+        # memsinker/external session, while the memsinker session itself
+        # remains in heartbeat.  (v1.8.2 — 2026-05-17)
+        try:
+            import run_agent as _ra_hb2
+            _hb_mgr2 = getattr(_ra_hb2, '_global_heartbeat_manager', None)
+            if _hb_mgr2 is not None and _hb_mgr2.enabled:
+                chat_key = f"{source.platform.value}:{source.chat_id}"
+                removed = _hb_mgr2.stop_all_for_chat(chat_key)
+                if removed:
+                    logger.warning(
+                        "Heartbeat diag: /new stop_all_for_chat removed "
+                        "%d session(s) for chat %s",
+                        removed, chat_key,
+                    )
+        except Exception as _hb_diag_exc2:
+            logger.warning(
+                "Heartbeat diag: /new stop_all_for_chat exception: %s",
+                _hb_diag_exc2, exc_info=True,
+            )
 
         # Discard any /queue overflow for this session — /new is a
         # conversation-boundary operation, queued follow-ups from the

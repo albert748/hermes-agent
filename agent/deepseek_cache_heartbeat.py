@@ -369,6 +369,33 @@ class SessionHeartbeatManager:
                 self._persist_dirty = True
         self._persist_sessions(force=True)
 
+    def stop_all_for_chat(self, chat_key: str) -> int:
+        """Permanently remove ALL sessions for a given chat_key.
+
+        Called when the user issues /new — stops every session belonging
+        to the same chat, not just the one tracked by the session store.
+        This handles the case where a memsinker/external session has
+        registered itself in heartbeat while the session store's
+        ``old_entry`` still points to a different (already-evicted) session.
+
+        Returns the number of sessions removed.
+        """
+        removed = 0
+        with self._lock:
+            for sid, state in list(self._sessions.items()):
+                if state.chat_key == chat_key:
+                    logger.info(
+                        "Heartbeat: stopping heartbeat for session %s "
+                        "(/new, chat=%s)",
+                        sid, chat_key,
+                    )
+                    del self._sessions[sid]
+                    self._persist_dirty = True
+                    removed += 1
+        if removed:
+            self._persist_sessions(force=True)
+        return removed
+
     # ── Persistence ───────────────────────────────────────────────────────
 
     def _maybe_persist(self) -> None:
