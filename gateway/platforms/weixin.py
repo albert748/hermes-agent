@@ -1832,6 +1832,25 @@ class WeixinAdapter(BasePlatformAdapter):
                             or errcode == RATE_LIMIT_ERRCODE
                         )
                         if is_rate_limited:
+                            # ret=-2 can also signal stale context_token on
+                            # iLink (same situation as errcode=-14 / "unknown
+                            # error").  Try without context_token before
+                            # falling back to genuine rate-limit backoff.
+                            if not retried_without_token and context_token:
+                                retried_without_token = True
+                                context_token = None
+                                self._token_store._cache.pop(
+                                    self._token_store._key(self._account_id, chat_id), None
+                                )
+                                logger.warning(
+                                    "[%s] retrying ret=-2 without context_token for %s",
+                                    self.name, _safe_id(chat_id),
+                                )
+                                # No backoff — iLink can accept the tokenless
+                                # retry immediately if the problem is purely
+                                # a stale session.
+                                continue
+
                             errmsg = resp.get("errmsg") or resp.get("msg") or "rate limited"
                             # Record the error so we raise a descriptive
                             # RuntimeError (instead of AssertionError) if the

@@ -83,7 +83,7 @@ class SearXNGWebSearchProvider(WebSearchProvider):
             resp = httpx.get(
                 f"{base_url}/search",
                 params=params,
-                timeout=15,
+                timeout=25,
                 headers={"Accept": "application/json"},
             )
             resp.raise_for_status()
