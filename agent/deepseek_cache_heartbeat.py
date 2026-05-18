@@ -140,6 +140,12 @@ class SessionHeartbeatManager:
         self._sessions: Dict[str, HeartbeatState] = {}
         self._lock = threading.Lock()
 
+        # session_id → monotonic stop time.  Sessions in this set have been
+        # explicitly stopped (via /new) and must NOT be re-registered by
+        # record_api_call(), even if an in-flight API call completes later.
+        # Entries are cleaned up in _tick() after max_idle_seconds * 2.
+        self._stopped_sessions: Dict[str, float] = {}
+
         # Event to wake the background thread immediately on stop().
         # Replaces time.sleep() polling so the thread responds within
         # milliseconds instead of up to interval_seconds * 0.5.
@@ -245,6 +251,18 @@ class SessionHeartbeatManager:
 
             state = self._sessions.get(session_id)
             if state is None:
+                # Guard: don't resurrect a session that was explicitly
+                # stopped via /new.  An in-flight API call from the old
+                # agent may complete after stop_session() has removed it
+                # from _sessions — if we blindly re-register, the old
+                # session's heartbeat lives on indefinitely.
+                if session_id in self._stopped_sessions:
+                    logger.debug(
+                        "Heartbeat: refusing to re-register stopped session %s "
+                        "(was /new'd — in-flight API call ignored)",
+                        session_id,
+                    )
+                    return
                 state = HeartbeatState(
                     session_id=session_id,
                     model=model,
@@ -367,6 +385,7 @@ class SessionHeartbeatManager:
                 )
                 del self._sessions[session_id]
                 self._persist_dirty = True
+        self._stopped_sessions[session_id] = time.monotonic()
         self._persist_sessions(force=True)
 
     def stop_all_for_chat(self, chat_key: str) -> int:
@@ -381,6 +400,7 @@ class SessionHeartbeatManager:
         Returns the number of sessions removed.
         """
         removed = 0
+        now = time.monotonic()
         with self._lock:
             for sid, state in list(self._sessions.items()):
                 if state.chat_key == chat_key:
@@ -392,6 +412,7 @@ class SessionHeartbeatManager:
                     del self._sessions[sid]
                     self._persist_dirty = True
                     removed += 1
+                    self._stopped_sessions[sid] = now
         if removed:
             self._persist_sessions(force=True)
         return removed
@@ -576,6 +597,15 @@ class SessionHeartbeatManager:
         """Scan sessions and ping those that need it."""
         now = time.monotonic()
         to_ping: List[HeartbeatState] = []
+
+        # Clean up stopped-sessions set: remove entries older than
+        # 2× max_idle_seconds.  After this point the session would
+        # have expired from heartbeat anyway, so the guard is moot.
+        if self._stopped_sessions:
+            cutoff = now - (self.max_idle_seconds * 2)
+            stale = [sid for sid, t in self._stopped_sessions.items() if t < cutoff]
+            for sid in stale:
+                del self._stopped_sessions[sid]
 
         # Persist if dirty and enough time has passed.
         self._maybe_persist()

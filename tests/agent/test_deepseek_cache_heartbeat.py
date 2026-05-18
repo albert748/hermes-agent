@@ -768,3 +768,86 @@ class TestSessionHeartbeatManager:
         assert mgr._sessions["s2"].chat_key == "telegram:8211517881", (
             "BUG: new session 's2' should inherit chat_key from evicted 's1'"
         )
+
+    def test_stop_session_prevents_re_registration(self):
+        """stop_session() must prevent record_api_call() from re-registering.
+
+        When the user issues /new, stop_session() removes the session from
+        heartbeat.  If an in-flight API call from the pre-/new agent
+        completes later, record_api_call() must NOT re-register the session.
+        """
+        mgr = SessionHeartbeatManager(enabled=True)
+        mgr.record_api_call(
+            session_id="s1",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            api_messages=[{"role": "system", "content": "hello"}],
+        )
+        assert "s1" in mgr._sessions
+
+        # User runs /new → session is stopped
+        mgr.stop_session("s1")
+        assert "s1" not in mgr._sessions
+        assert "s1" in mgr._stopped_sessions
+
+        # Simulate in-flight API call completing after /new
+        mgr.record_api_call(
+            session_id="s1",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            api_messages=[{"role": "system", "content": "late completion"}],
+        )
+
+        # MUST NOT be re-registered
+        assert "s1" not in mgr._sessions, (
+            "BUG: record_api_call re-registered a session that was "
+            "explicitly stopped via stop_session().  In-flight API calls "
+            "from the pre-/new agent must not resurrect dead sessions."
+        )
+
+    def test_stop_all_for_chat_prevents_re_registration(self):
+        """stop_all_for_chat() must prevent record_api_call() re-registration."""
+        mgr = SessionHeartbeatManager(enabled=True)
+        # Register two sessions with different chat_keys (so chat_key
+        # eviction inside record_api_call doesn't remove s1 prematurely).
+        mgr.record_api_call(
+            session_id="s1",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            api_messages=[{"role": "system", "content": "hello"}],
+            chat_key="telegram:8211517881",
+        )
+        mgr.record_api_call(
+            session_id="s2",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            api_messages=[{"role": "system", "content": "memsinker"}],
+            chat_key="weixin:o9cq802XH2jh",   # different chat
+        )
+        assert len(mgr._sessions) == 2
+
+        # /new on telegram → stop all sessions for that chat
+        removed = mgr.stop_all_for_chat("telegram:8211517881")
+        assert removed == 1  # only s1
+        assert "s1" not in mgr._sessions
+        assert "s2" in mgr._sessions  # weixin session unaffected
+
+        # In-flight API call for s1 completes after /new
+        mgr.record_api_call(
+            session_id="s1",
+            model="deepseek-chat",
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-xxx",
+            api_messages=[{"role": "system", "content": "late"}],
+            chat_key="telegram:8211517881",
+        )
+
+        # MUST NOT be re-registered
+        assert "s1" not in mgr._sessions, (
+            "BUG: record_api_call re-registered s1 after stop_all_for_chat"
+        )
+        assert "s2" in mgr._sessions  # weixin session still alive
