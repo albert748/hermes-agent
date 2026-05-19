@@ -561,7 +561,7 @@ class MemoryManager:
         """
         return extract_user_instruction_from_skill_message(text)
 
-    def prefetch_all(self, query: str, *, session_id: str = "") -> str:
+    def prefetch_all(self, query: str, *, session_id: str = "", model: str = "") -> str:
         """Collect prefetch context from all providers.
 
         Returns merged context text labeled by provider. Empty providers
@@ -573,7 +573,7 @@ class MemoryManager:
         parts = []
         for provider in self._providers:
             try:
-                result = self._prefetch_provider(provider, clean_query, session_id=session_id)
+                result = self._prefetch_provider(provider, clean_query, session_id=session_id, model=model)
                 if result and result.strip():
                     parts.append(result)
             except Exception as e:
@@ -584,17 +584,17 @@ class MemoryManager:
         return "\n\n".join(parts)
 
     def _prefetch_provider(
-        self, provider: MemoryProvider, query: str, *, session_id: str = ""
+        self, provider: MemoryProvider, query: str, *, session_id: str = "", model: str = ""
     ) -> str:
         if provider.name == "builtin":
-            return provider.prefetch(query, session_id=session_id)
+            return provider.prefetch(query, session_id=session_id, model=model)
 
         result_box: Dict[str, str] = {}
         error_box: Dict[str, Exception] = {}
 
         def _run() -> None:
             try:
-                result_box["value"] = provider.prefetch(query, session_id=session_id) or ""
+                result_box["value"] = provider.prefetch(query, session_id=session_id, model=model) or ""
             except Exception as exc:  # pragma: no cover - re-raised by caller
                 error_box["value"] = exc
 
