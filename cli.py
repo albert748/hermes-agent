@@ -6938,6 +6938,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 parts.append(idle_since)
             if focus_label:
                 parts.append(focus_label)
+            total_tokens = snapshot.get("session_total_tokens", 0)
+            if total_tokens:
+                parts.append(f"Σ {format_token_count_compact(total_tokens)}")
             if yolo_active:
                 parts.append("⚠ YOLO")
             return self._right_align_status_title(" │ ".join(parts), session_title, width)
@@ -7077,6 +7080,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     if focus_label:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append(("class:status-bar-strong", focus_label))
+                    # Position 9: total session token consumption
+                    total_tokens = snapshot.get("session_total_tokens", 0)
+                    if total_tokens:
+                        frags.append(("class:status-bar-dim", " │ "))
+                        frags.append(("class:status-bar-dim", f"Σ {format_token_count_compact(total_tokens)}"))
                     if yolo_active:
                         frags.append(("class:status-bar-dim", " │ "))
                         frags.append(("class:status-bar-yolo", "⚠ YOLO"))
