@@ -143,8 +143,10 @@ def test_file_mutation_lint_error_result_is_not_a_tool_failure():
         "lsp_diagnostics": "<diagnostics>ERROR [1:1] type mismatch</diagnostics>",
     })
 
-    assert classify_tool_failure("write_file", write_result) == (False, "")
-    assert classify_tool_failure("patch", patch_result) == (False, "")
+    is_err_w, _ = classify_tool_failure("write_file", write_result)
+    assert is_err_w is False  # lint error is warning, not error
+    is_err_p, _ = classify_tool_failure("patch", patch_result)
+    assert is_err_p is False  # LSP diagnostics on success is not an error
 
 
 def test_same_tool_varying_args_warns_by_default_without_halting():

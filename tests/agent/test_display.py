@@ -113,44 +113,72 @@ class TestBuildToolPreview:
 
 
 class TestCuteToolMessagePreviewLength:
-    def test_terminal_preview_unlimited_when_config_is_zero(self):
+    def test_terminal_completion_shows_both_input_and_result(self):
+        """Completion line shows BOTH input (command) and result."""
         set_tool_preview_max_len(0)
-        command = "curl -s http://localhost:9222/json/list | jq -r '.[] | select(.type==\"page\")' | head -5"
+        # Use a short command that fits within the preview length
+        command = "git status"
 
+        # Without explicit result: shows command + OK
         line = get_cute_tool_message("terminal", {"command": command}, 0.1)
+        assert command in line       # input: the command
+        assert "→" in line           # separator
+        assert "OK" in line          # result
+        assert "✅" in line          # status icon
 
-        assert command in line
-        assert "..." not in line
+        # With error result: shows command + exit code/message
+        line2 = get_cute_tool_message("terminal", {"command": command}, 0.1,
+                                       json.dumps({"exit_code": 1, "error": "something went wrong"}))
+        assert command in line2      # input is still shown
+        assert "→" in line2          # separator
+        assert "exit 1" in line2     # result
+        assert "❌" in line2
 
-    def test_terminal_preview_uses_positive_configured_limit(self):
+    def test_result_message_truncation(self):
+        """Long error messages are truncated to ~64 chars."""
         set_tool_preview_max_len(80)
-        command = "curl -s http://localhost:9222/json/list | jq -r '.[] | select(.type==\"page\")' | head -5"
+        long_error = "E" * 100
 
-        line = get_cute_tool_message("terminal", {"command": command}, 0.1)
+        line = get_cute_tool_message("terminal", {"command": "cmd"}, 0.1,
+                                      json.dumps({"exit_code": 1, "error": long_error}))
+        # The message should be truncated (64 chars + "exit 1: " prefix)
+        assert len(long_error) > 64
+        # Error text should appear truncated
+        assert "..." in line or len(line.split("exit 1: ")[-1].split("  ")[0]) <= 70
 
-        assert command[:77] in line
-        assert "..." in line
-        assert "head -5" not in line
-
-    def test_search_files_preview_uses_positive_configured_limit_not_default(self):
+    def test_search_files_shows_match_count_not_pattern(self):
         set_tool_preview_max_len(80)
         pattern = "function.formatToolCall.context.preview.compactPreview.maxLength.truncate"
 
+        # Without result: shows OK
         line = get_cute_tool_message("search_files", {"pattern": pattern}, 0.1)
+        assert "OK" in line
+        assert "✅" in line
+        assert pattern not in line
 
-        assert pattern in line
-        assert "..." not in line
+        # With result: shows match count
+        line2 = get_cute_tool_message("search_files", {"pattern": pattern}, 0.1,
+                                       json.dumps({"total_count": 5, "matches": [{} for _ in range(5)]}))
+        assert "5 matches" in line2
+        assert pattern not in line2
 
-    def test_path_preview_uses_positive_configured_limit_not_default(self):
+    def test_read_file_shows_result_not_path(self):
         set_tool_preview_max_len(80)
         path = "/tmp/hermes-test-preview-length/deeply/nested/path/test-output.txt"
 
+        # Without result: shows OK
         line = get_cute_tool_message("read_file", {"path": path}, 0.1)
+        assert "OK" in line
+        assert "✅" in line
+        assert path not in line
 
-        assert path in line
-        assert "..." not in line
+        # With error: shows filename
+        line2 = get_cute_tool_message("read_file", {"path": path}, 0.1,
+                                       json.dumps({"error": f"File not found: {path}"}))
+        assert "File not found: test-output.txt" in line2
+        assert "❌" in line2
 
-    def test_write_file_lint_error_result_is_not_marked_failed(self):
+    def test_write_file_lint_error_shows_warning_not_error(self):
         result = json.dumps({
             "bytes_written": 12,
             "lint": {"status": "error", "output": "SyntaxError: invalid syntax"},
@@ -158,9 +186,11 @@ class TestCuteToolMessagePreviewLength:
 
         line = get_cute_tool_message("write_file", {"path": "/tmp/a.py"}, 0.1, result=result)
 
-        assert "[error]" not in line
+        assert "🟡" in line       # warning icon, not error
+        assert "❌" not in line   # should NOT show error icon
+        assert "lint error" in line
 
-    def test_patch_lsp_diagnostics_result_is_not_marked_failed(self):
+    def test_patch_lsp_diagnostics_shows_success_not_error(self):
         result = json.dumps({
             "success": True,
             "diff": "--- a/tmp.py\n+++ b/tmp.py\n",
@@ -169,7 +199,8 @@ class TestCuteToolMessagePreviewLength:
 
         line = get_cute_tool_message("patch", {"path": "/tmp/a.py"}, 0.1, result=result)
 
-        assert "[error]" not in line
+        assert "✅" in line       # success icon
+        assert "❌" not in line   # should NOT show error icon
 
 
 class TestEditDiffPreview:
@@ -277,3 +308,50 @@ class TestEditDiffPreview:
         assert any("a/file2.py" in line for line in rendered)
         assert not any("a/file7.py" in line for line in rendered)
         assert "additional file" in rendered[-1]
+
+
+class TestGenericStatusField:
+    """Plugins can declare status via _status in response JSON — no display.py branch needed."""
+
+    def test_zero_results_via_status_field(self):
+        """Plugin response with _status='warning' → 🟡 warning icon."""
+        result = json.dumps({
+            "matches": [], "count": 0, "query": "nothing",
+            "_summary": "0 results", "_status": "warning",
+        })
+        # Use a non-builtin tool name to prove it hits generic fallback
+        line = get_cute_tool_message("obsidian_search", {"query": "nothing"}, 0.1, result=result)
+        assert "🟡" in line, f"Expected warning icon via _status, got: {line}"
+        assert "✅" not in line
+
+    def test_success_via_status_field(self):
+        """Plugin response with _status='success' → ✅ success icon."""
+        result = json.dumps({
+            "matches": [{"path": "a.md"}], "count": 1, "query": "test",
+            "_summary": "1 result", "_status": "success",
+        })
+        line = get_cute_tool_message("obsidian_search", {"query": "test"}, 0.1, result=result)
+        assert "✅" in line
+        assert "1 result" in line
+
+    def test_error_with_success_false(self):
+        """Plugin response with success=False → ❌ error (error path, not _status)."""
+        result = json.dumps({"error": "API unreachable", "success": False})
+        line = get_cute_tool_message("obsidian_search", {"query": "test"}, 0.1, result=result)
+        assert "❌" in line
+
+    def test_plain_content_shows_size(self):
+        """Non-dict result > 100 chars → shows size + ✅."""
+        content = "x" * 200
+        line = get_cute_tool_message("obsidian_read", {"path": "note.md"}, 0.1, result=content)
+        assert "✅" in line
+        assert "200 chars" in line
+
+    def test_invalid_status_ignored(self):
+        """Invalid _status value is ignored, falls back to 'success'."""
+        result = json.dumps({
+            "matches": [], "count": 0,
+            "_summary": "0 results", "_status": "bogus",
+        })
+        line = get_cute_tool_message("obsidian_search", {"query": "test"}, 0.1, result=result)
+        assert "✅" in line  # invalid status → success
