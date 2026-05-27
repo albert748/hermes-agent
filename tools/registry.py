@@ -164,11 +164,13 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
+        "display_label", "classify_result",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, dynamic_schema_overrides=None):
+                 max_result_size_chars=None, dynamic_schema_overrides=None,
+                 display_label=None, classify_result=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -178,6 +180,8 @@ class ToolEntry:
         self.is_async = is_async
         self.description = description
         self.emoji = emoji
+        self.display_label = display_label
+        self.classify_result = classify_result
         self.max_result_size_chars = max_result_size_chars
         # Optional zero-arg callable returning a dict of schema overrides
         # applied at get_definitions() time. Use for fields that depend on
@@ -531,9 +535,20 @@ class ToolRegistry:
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None,
+        display_label: str = "",
+        classify_result: Callable | None = None,
         override: bool = False,
     ):
         """Register a tool.  Called at module-import time by each tool file.
+
+        Pass ``classify_result`` to provide a custom result classifier for CLI
+        display.  The callable receives the parsed result dict and returns
+        ``(status, message)`` or ``None`` to fall through to the generic
+        classifier.
+
+        ``display_label`` is an optional short name for CLI display (e.g.
+        ``"obsearch"`` for ``"obsidian_search"``).  Falls back to the tool
+        name if not set.
 
         ``override=True`` is an explicit opt-in for plugins that intend to
         replace an existing built-in tool implementation (e.g. swap the
@@ -591,6 +606,8 @@ class ToolRegistry:
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
+                display_label=display_label or name,
+                classify_result=classify_result,
             )
             # Availability is now derived per-tool (_toolset_has_exposable_tools),
             # so this map no longer gates a toolset. It is still consumed by
@@ -825,6 +842,16 @@ class ToolRegistry:
         """Return the emoji for a tool, or *default* if unset."""
         entry = self.get_entry(name)
         return (entry.emoji if entry and entry.emoji else default)
+
+    def get_display_label(self, name: str, default: str = "") -> str:
+        """Return the display label for a tool, or *default* if unset."""
+        entry = self.get_entry(name)
+        return (entry.display_label if entry and entry.display_label else default)
+
+    def get_result_classifier(self, name: str) -> Callable | None:
+        """Return the registered ``classify_result`` callback, or None."""
+        entry = self.get_entry(name)
+        return entry.classify_result if entry else None
 
     def get_tool_to_toolset_map(self) -> Dict[str, str]:
         """Return ``{tool_name: toolset_name}`` for every registered tool."""
