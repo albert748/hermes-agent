@@ -1708,9 +1708,19 @@ class PluginContext:
         is_async: bool = False,
         description: str = "",
         emoji: str = "",
+        display_label: str = "",
+        classify_result: Callable | None = None,
         override: bool = False,
     ) -> Optional[PluginRegistration]:
         """Register a tool in the global registry **and** track it as plugin-provided.
+
+        Pass ``display_label`` to set a short display name (e.g. ``"obsearch"``
+        for ``"obsidian_search"``).
+
+        Pass ``classify_result`` to provide a custom result classifier for CLI
+        display.  The callable receives the parsed result dict and returns
+        ``(status, message)`` or ``None`` to fall through to the generic
+        classifier.
 
         Pass ``override=True`` to replace an existing built-in tool with the
         same name (e.g. swap the default ``browser_navigate`` for a custom
@@ -1756,6 +1766,8 @@ class PluginContext:
             is_async=is_async,
             description=description,
             emoji=emoji,
+            display_label=display_label,
+            classify_result=classify_result,
             override=override,
             scope=scope,
         )
