@@ -8,6 +8,7 @@ import {
   estimateRows,
   estimateTokensRough,
   fmtK,
+  formatToolCall,
   hasAnsi,
   isToolTrailResultLine,
   lastCotTrailIndex,
@@ -17,7 +18,8 @@ import {
   sanitizeAnsiForRender,
   splitToolDuration,
   stripAnsi,
-  thinkingPreview
+  thinkingPreview,
+  toolEmoji
 } from '../lib/text.js'
 
 describe('isToolTrailResultLine', () => {
@@ -32,9 +34,9 @@ describe('buildToolTrailLine', () => {
   it('puts completion duration inline before the result marker', () => {
     const line = buildToolTrailLine('read_file', 'x', false, '', 0.94)
 
-    expect(line).toBe('Read File("x") (0.9s) ✓')
-    expect(parseToolTrailResultLine(line)).toEqual({ call: 'Read File("x") (0.9s)', detail: '', mark: '✓' })
-    expect(splitToolDuration('Read File("x") (0.9s)')).toEqual({ label: 'Read File("x")', duration: ' (0.9s)' })
+    expect(line).toBe('📖 Read File("x") (0.9s) ✓')
+    expect(parseToolTrailResultLine(line)).toEqual({ call: '📖 Read File("x") (0.9s)', detail: '', mark: '✓' })
+    expect(splitToolDuration('📖 Read File("x") (0.9s)')).toEqual({ label: '📖 Read File("x")', duration: ' (0.9s)' })
   })
 })
 
@@ -52,7 +54,7 @@ describe('buildVerboseToolTrailLine', () => {
     expect(line).toContain('Args:\n{')
     expect(line).toContain('Result:\nfirst line\nsecond :: line')
     expect(parseToolTrailResultLine(line)).toEqual({
-      call: 'Terminal("npm test") (1.3s)',
+      call: '💻 Terminal("npm test") (1.3s)',
       detail: 'Args:\n{\n  "cmd": "npm test"\n}\nResult:\nfirst line\nsecond :: line',
       mark: '✓'
     })
@@ -64,7 +66,7 @@ describe('buildVerboseToolTrailLine', () => {
     expect(line).toContain('Error:\ncommand failed')
     expect(line).not.toContain('Result:\ncommand failed')
     expect(parseToolTrailResultLine(line)).toEqual({
-      call: 'Terminal("npm test") (0.5s)',
+      call: '💻 Terminal("npm test") (0.5s)',
       detail: 'Error:\ncommand failed',
       mark: '✗'
     })
@@ -252,5 +254,35 @@ describe('estimateRows', () => {
     const plain = 'look at test case with underscores now'
 
     expect(estimateRows(snake, w)).toBe(estimateRows(plain, w))
+  })
+})
+
+describe('toolEmoji', () => {
+  it('returns registered emoji for known tools', () => {
+    expect(toolEmoji('read_file')).toBe('📖')
+    expect(toolEmoji('web_search')).toBe('🔍')
+    expect(toolEmoji('terminal')).toBe('💻')
+    expect(toolEmoji('delegate_task')).toBe('🔀')
+  })
+
+  it('returns default ⚡ for unknown tools', () => {
+    expect(toolEmoji('nonexistent_tool')).toBe('⚡')
+    expect(toolEmoji('')).toBe('⚡')
+  })
+})
+
+describe('formatToolCall', () => {
+  it('prefixes with tool emoji', () => {
+    expect(formatToolCall('read_file', 'config.yaml')).toBe('📖 Read File("config.yaml")')
+    expect(formatToolCall('web_search', 'latest news')).toBe('🔍 Web Search("latest news")')
+    expect(formatToolCall('terminal', 'ls -la')).toBe('💻 Terminal("ls -la")')
+  })
+
+  it('returns emoji + label for no-context calls', () => {
+    expect(formatToolCall('read_file', '')).toBe('📖 Read File')
+  })
+
+  it('falls back to ⚡ for unknown tools', () => {
+    expect(formatToolCall('unknown_tool', 'arg')).toBe('⚡ Unknown Tool("arg")')
   })
 })

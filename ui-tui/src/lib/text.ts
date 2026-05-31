@@ -195,11 +195,52 @@ export const toolTrailLabel = (name: string) =>
     .map(p => p[0]!.toUpperCase() + p.slice(1))
     .join(' ') || name
 
+// ── Tool emoji — mirrors CLI display.py _completion() + tools/registry.py ──
+const TOOL_EMOJI: Record<string, string> = {
+  web_search: '🔍',
+  web_extract: '📄',
+  web_crawl: '🕸️',
+  terminal: '💻',
+  execute_code: '🐍',
+  process: '⚙️',
+  read_file: '📖',
+  write_file: '✍️',
+  patch: '🔧',
+  search_files: '📂',
+  skill_view: '📚',
+  skill_manage: '📚',
+  skills_list: '📚',
+  memory: '🧠',
+  search_memory: '🧠',
+  session_search: '🕐',
+  todo: '📋',
+  cronjob: '⏰',
+  send_message: '📨',
+  clarify: '💬',
+  delegate_task: '🔀',
+  browser_navigate: '🌐',
+  browser_snapshot: '📸',
+  browser_click: '👆',
+  browser_type: '⌨️',
+  browser_scroll: '↕️',
+  browser_back: '◀️',
+  browser_press: '⌨️',
+  browser_get_images: '🖼️',
+  browser_vision: '👁️',
+  image_generate: '🎨',
+  text_to_speech: '🔊',
+  vision_analyze: '👁️',
+  mixture_of_agents: '🧠',
+}
+
+export const toolEmoji = (name: string) => TOOL_EMOJI[name] ?? '⚡'
+
 export const formatToolCall = (name: string, context = '') => {
+  const emoji = toolEmoji(name)
   const label = toolTrailLabel(name)
   const preview = compactPreview(context, 64)
 
-  return preview ? `${label}("${preview}")` : label
+  return preview ? `${emoji} ${label}("${preview}")` : `${emoji} ${label}`
 }
 
 export const buildToolTrailLine = (

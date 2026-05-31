@@ -453,10 +453,7 @@ function SubagentAccordion({
               branch={index === item.tools.length - 1 ? 'last' : 'mid'}
               color={t.color.text}
               content={
-                <>
-                  <Text color={t.color.tool}>● </Text>
-                  {line}
-                </>
+                <Text color={t.color.accent}>{line}</Text>
               }
               key={`${item.id}-tool-${index}`}
               rails={childRails}
@@ -1098,7 +1095,7 @@ export const ToolTrail = memo(function ToolTrail({
                   color={group.color}
                   content={
                     <>
-                      <Text color={t.color.tool}>● </Text>
+
                       {toolLabel(group)}
                       {isDelegateGroup ? (
                         <Text color={t.color.statusFg} dim>
