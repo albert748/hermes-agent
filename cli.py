@@ -33,6 +33,7 @@ import re
 import concurrent.futures
 import base64
 import atexit
+import signal
 import errno
 import tempfile
 import time
@@ -4950,6 +4951,21 @@ def save_config_value(key_path: str, value: any) -> bool:
 
 
 # ============================================================================
+# Helper functions
+# ============================================================================
+
+
+def _detect_tmux() -> bool:
+    """Detect if the CLI is running inside a tmux session.
+
+    Checks the ``TMUX`` environment variable (set by tmux itself) and
+    falls back to ``TERM`` starting with ``tmux-``, which also covers
+    tmux-256color and similar variants.
+    """
+    return "TMUX" in os.environ or (os.environ.get("TERM") or "").startswith("tmux-")
+
+
+# ============================================================================
 # HermesCLI Class
 # ============================================================================
 
@@ -6023,6 +6039,58 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         except Exception:
             # Fail open: never leave the bar stuck hidden.
             self._status_bar_suppressed_after_resize = False
+
+        # After a resize, schedule deferred recovery of the status bar.
+        # This ensures it reappears even when no user input follows the
+        # resize — e.g. Termux soft-keyboard toggle fires SIGWINCH but
+        # the user might not type anything, leaving the bar hidden
+        # indefinitely under the input-driven recovery model.
+        self._schedule_status_bar_restore(app)
+
+    @staticmethod
+    def _format_context_pct(context_tokens: int, context_length: Optional[int]) -> str:
+        """Format context usage as a compact percentage string.
+
+        Returns ``"42%"`` when both values are positive, ``"--%"`` when
+        context_length is unknown, and ``""`` (empty) when there is no
+        meaningful usage to report at all.
+        """
+        if not context_length:
+            return "--%"
+        return f"{max(0, min(100, round((context_tokens / context_length) * 100)))}%"
+
+    def _schedule_status_bar_restore(self, app, delay: float = 2.0) -> None:
+        """Schedule restoring the status bar after resize-induced suppression.
+
+        On Termux (and other mobile terminals), soft-keyboard toggle fires
+        SIGWINCH, which triggers ``_recover_after_resize`` and sets
+        ``_status_bar_suppressed_after_resize``.  The suppression normally
+        clears on the next user input, but keyboard toggle isn't followed
+        by input, so the bar stays hidden.  This delayed recovery restores
+        it after a quiet period.
+        """
+
+        def _do_restore() -> None:
+            try:
+                if getattr(self, "_status_bar_suppressed_after_resize", False):
+                    self._status_bar_suppressed_after_resize = False
+                    self._invalidate(min_interval=0)
+            except Exception:
+                pass
+
+        def _timer_fired() -> None:
+            try:
+                loop = getattr(app, "loop", None)
+                if loop is not None:
+                    loop.call_soon_threadsafe(_do_restore)
+                else:
+                    _do_restore()
+            except Exception:
+                pass
+
+        timer = threading.Timer(delay, _timer_fired)
+        timer.daemon = True
+        timer.start()
 
     def _schedule_resize_recovery(self, app, original_on_resize, delay: float = 0.12) -> None:
         """Debounce resize redraws so footer chrome is not stamped into scrollback."""
@@ -7128,11 +7196,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             session_title = snapshot.get("session_title") or ""
 
             if width < 52:
+                percent = snapshot["context_percent"]
+                percent_label = f"{percent}%" if percent is not None else "--%"
                 frags = [
                     ("class:status-bar", " ⚕ "),
                     ("class:status-bar-strong", snapshot["model_short"]),
                     ("class:status-bar-dim", " · "),
-                    ("class:status-bar-dim", duration_label),
+                    (self._status_bar_context_style(percent), percent_label),
                 ]
                 if goal_segment:
                     frags.append(("class:status-bar-dim", " · "))
@@ -7143,7 +7213,11 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 if yolo_active:
                     frags.append(("class:status-bar-dim", " · "))
                     frags.append(("class:status-bar-yolo", "⚠ YOLO"))
-                frags.append(("class:status-bar", " "))
+                frags.extend([
+                    ("class:status-bar-dim", " · "),
+                    ("class:status-bar-dim", duration_label),
+                    ("class:status-bar", " "),
+                ])
             else:
                 percent = snapshot["context_percent"]
                 percent_label = f"{percent}%" if percent is not None else "--"
@@ -20317,6 +20391,28 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         _apply_bracketed_paste_timeout_patch()
 
         self._install_resize_recovery(app)
+
+        # ── tmux SIGCONT handler ────────────────────────────────────────
+        # When running inside tmux, switching panes sends SIGCONT to the
+        # restored process.  prompt_toolkit's tracked _cursor_pos drifts
+        # during the switch (no SIGWINCH fires), so the next incremental
+        # redraw starts from a wrong origin and overlaps content — the root
+        # cause of duplicated prompts and ghost status bars after tmux tab
+        # or pane switches.
+        #
+        # We catch SIGCONT and force a full redraw (erase_screen +
+        # renderer.reset) to re-sync the cursor position to (0, 0) before
+        # the next paint.  This matches the existing Ctrl+L / /redraw
+        # recovery path but fires automatically on pane restore.
+        if _detect_tmux():
+
+            def _on_sigcont(signum, frame):
+                try:
+                    self._force_full_redraw()
+                except Exception:
+                    pass
+
+            signal.signal(signal.SIGCONT, _on_sigcont)
 
         def spinner_loop():
             while not self._should_exit:
