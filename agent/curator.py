@@ -217,6 +217,17 @@ def get_consolidate() -> bool:
     return bool(cfg.get("consolidate", DEFAULT_CONSOLIDATE))
 
 
+def get_companion_skill() -> str:
+    """Return the companion skill name from config, or empty string.
+
+    When non-empty, the curator's LLM review fork loads this skill as a
+    companion and follows its maintenance instructions after the
+    umbrella-building pass. Leave empty (default) to disable.
+    """
+    cfg = _load_config()
+    return str(cfg.get("companion_skill", "") or "").strip()
+
+
 # ---------------------------------------------------------------------------
 # Idle / interval check
 # ---------------------------------------------------------------------------
@@ -1698,6 +1709,26 @@ def run_curator_review(
                     )
                 else:
                     prompt = f"{CURATOR_REVIEW_PROMPT}{builtins_note}\n\n{candidate_list}"
+
+                # Append companion skill instructions when configured
+                companion_skill = get_companion_skill()
+                if companion_skill and not dry_run:
+                    prompt += (
+                        f"\n\n### Content maintenance (companion: {companion_skill})\n"
+                        f"After the umbrella-building consolidation, load the companion "
+                        f"skill '{companion_skill}' via skill_view('{companion_skill}') "
+                        f"and follow its instructions for content maintenance. "
+                        f"Skip this step if the skill is not available.\n\n"
+                        f"Record every content maintenance action in a `maintenances:` "
+                        f"block in the structured YAML output:\n"
+                        f"```yaml\n"
+                        f"maintenances:\n"
+                        f"  - skill: <name>\n"
+                        f"    action: thin | archive-refs | sink-refs | deprecate\n"
+                        f"    detail: <brief description>\n"
+                        f"```\n"
+                    )
+
                 llm_meta = _run_llm_review(prompt)
                 final_summary = (
                     f"{prefix}{auto_summary}; llm: {llm_meta.get('summary', 'no change')}"
