@@ -920,11 +920,22 @@ def sync_skills(quiet: bool = False) -> dict:
     for name in cleaned:
         del manifest[name]
 
-    # Also copy DESCRIPTION.md files for categories (if not already present)
+    # Also copy DESCRIPTION.md files for categories that actually have skills.
+    # Only create the category marker when at least one skill directory exists
+    # in that category (either just synced or pre-existing). Without this gate,
+    # deleting an empty category directory (e.g. skills/apple/) causes it to
+    # be permanently recreated on every sync, even though no skills are there.
     for desc_md in bundled_dir.rglob("DESCRIPTION.md"):
         rel = desc_md.relative_to(bundled_dir)
         dest_desc = SKILLS_DIR / rel
         if not dest_desc.exists():
+            category_dir = dest_desc.parent
+            # Don't create category dir unless there are actual skill dirs in it
+            if not category_dir.exists() or not any(
+                p.is_dir() and not p.name.startswith(".")
+                for p in category_dir.iterdir()
+            ):
+                continue
             try:
                 dest_desc.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(desc_md, dest_desc)
