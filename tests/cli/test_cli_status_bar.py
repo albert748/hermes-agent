@@ -113,15 +113,6 @@ class TestCLIStatusBar:
 
         assert "🗜️ 3" in text
 
-
-
-
-
-
-<<<<<<< HEAD
-=======
-        assert "🗜️ 2" in text
-
     def test_compression_count_hidden_in_narrow_status_bar(self):
         cli_obj = _attach_agent(
             _make_cli(),
@@ -187,8 +178,6 @@ class TestCLIStatusBar:
         frag_texts = [text for _, text in frags]
 
         assert not any("🗜️" in t for t in frag_texts)
->>>>>>> a21ec8a33 (feat(cli): 状态栏显示 session 总 token 消耗 (Σ))
-
     def test_minimal_tui_chrome_threshold(self):
         cli_obj = _make_cli()
 
