@@ -435,6 +435,17 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
     """
     if max_len is None:
         max_len = _tool_preview_max_len
+    # todo previews are derived from args shape alone and must work with
+    # empty args ({}) — "reading task list" is the default read state.
+    if tool_name == "todo":
+        todos_arg = args.get("todos")
+        merge = args.get("merge", False)
+        if todos_arg is None:
+            return "reading task list"
+        elif merge:
+            return f"updating {len(todos_arg)} task(s)"
+        else:
+            return f"planning {len(todos_arg)} task(s)"
     if not args:
         return None
     args = redact_tool_args_for_display(tool_name, args) or args
@@ -1353,181 +1364,582 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
     return False, ""
 
 
+_STATUS_ICONS = {"success": "✅", "warning": "🟡", "error": "❌"}
+
+# Exit codes that indicate "no results" rather than real errors
+_WARNING_EXIT_PATTERNS = [
+    "No matches found",
+    "no matches found",
+    "Not an error",
+    "not an error",
+]
+
+# Terminal exit codes that are always errors (regardless of message)
+# 124 = timeout, 125-128 = shell builtin errors, 130 = SIGINT, 137 = SIGKILL, 255 = general
+_ERROR_EXIT_CODES = {124, 125, 126, 127, 128, 130, 137, 139, 143, 255}
+
+
+
+
+def _content_kb(data: dict) -> str:
+    """Return content size suffix like `` 2.3KB`` from tool result data.
+
+    For read_file results, uses the actual read ``content`` (not the total
+    ``file_size``) so the display reflects what was *returned*, not the
+    full file.  For other tools falls back to ``file_size`` then content.
+    """
+    if not isinstance(data, dict):
+        return ""
+    content = data.get("content") or ""
+    if isinstance(content, str) and len(content) > 0:
+        kb = len(content.encode("utf-8")) / 1024
+    else:
+        file_size = data.get("file_size", 0)
+        if isinstance(file_size, (int, float)) and file_size > 0:
+            kb = file_size / 1024
+        else:
+            return ""
+    if kb >= 100:
+        return f" {kb:.0f}KB"
+    elif kb >= 1:
+        return f" {kb:.1f}KB"
+    return ""
+
+
+
+
+def _classify_tool_result(
+    tool_name: str, result: str | None,
+    args: dict | None = None,
+) -> tuple[str, str]:
+    """Classify a tool result as success, warning, or error.
+
+    *args* is the tool's invocation arguments (optional), used by
+    ``read_file`` to annotate the result with offset info.
+
+    Returns ``(status, message)`` where *status* is one of
+    ``"success"``, ``"warning"``, ``"error"`` and *message* is a
+    human-readable summary for display (up to 64 chars for errors).
+    """
+    if result is None:
+        return "success", "OK"
+
+    data = safe_json_loads(result)
+
+    # ── terminal / execute_code ──
+    if tool_name in ("terminal", "execute_code"):
+        if isinstance(data, dict):
+            exit_code = data.get("exit_code")
+            if exit_code is not None and exit_code != 0:
+                err_msg = data.get("error")
+                exit_meaning = data.get("exit_code_meaning", "")
+
+                # Warning: exit 1 with "No matches found" or similar non-error messages
+                if exit_code == 1 and not err_msg:
+                    if exit_meaning and any(
+                        p.lower() in exit_meaning.lower()
+                        for p in _WARNING_EXIT_PATTERNS
+                    ):
+                        return "warning", "no matches"
+                    # Also check output for common "not found" patterns
+                    output = data.get("output", "")
+                    if output and any(
+                        p.lower() in output.lower()[:200]
+                        for p in _WARNING_EXIT_PATTERNS
+                    ):
+                        return "warning", "no matches"
+
+                # True error: format with exit code and message
+                if err_msg:
+                    msg = str(err_msg)[:64]
+                    return "error", f"exit {exit_code}: {msg}"
+                elif exit_code in _ERROR_EXIT_CODES:
+                    return "error", f"exit {exit_code}"
+                else:
+                    # Include first line of output as error context
+                    output = data.get("output", "")
+                    if output:
+                        first_line = output.strip().split("\n")[0][:64]
+                        return "error", f"exit {exit_code}: {first_line}"
+                    return "error", f"exit {exit_code}"
+            # exit_code == 0: success — try to extract output length
+            return "success", "OK"
+        return "success", "OK"
+
+    # ── web_search ──
+    if tool_name == "web_search":
+        if isinstance(data, dict):
+            web_data = data.get("data", {}).get("web", [])
+            n = len(web_data)
+            if data.get("success") is True and n == 0:
+                return "warning", "no results"
+            if data.get("success") is True:
+                return "success", f"{n} result{'s' if n != 1 else ''}"
+            if data.get("success") is False:
+                err = data.get("error") or data.get("message", "error")
+                return "error", str(err)[:64]
+        return "success", "OK"
+
+    # ── web_extract ──
+    if tool_name == "web_extract":
+        if isinstance(data, dict):
+            results = data.get("results", [])
+            n = len(results) if isinstance(results, list) else 0
+            if data.get("success") is False:
+                err = data.get("error") or data.get("message", "error")
+                return "error", str(err)[:64]
+            if n > 0:
+                # Per-page errors (Tavily connection failure) or empty
+                # content (Tavily connected but extractor found no article
+                # body, e.g. login wall / JS shell).
+                failed_count = sum(
+                    1 for r in results if r.get("error") or not r.get("content")
+                )
+                if failed_count == n:
+                    # ALL results failed → ❌
+                    err = next(
+                        (r["error"] for r in results if r.get("error")),
+                        "All pages returned no content",
+                    )
+                    return "error", str(err)[:64]
+                if failed_count > 0:
+                    # Mixed results → 🟡
+                    ok = n - failed_count
+                    return "warning", f"{ok}/{n} pages OK"
+                return "success", f"{n} page{'s' if n != 1 else ''}"
+        return "success", "OK"
+
+    # ── read_file ──
+    if tool_name == "read_file":
+        if isinstance(data, dict):
+            err = data.get("error") or ""
+            if data.get("success") is False or "error" in data:
+                if "File not found" in str(err):
+                    path_part = str(err).split("File not found:", 1)[-1].strip()
+                    if "/" in path_part:
+                        filename = path_part.split("/")[-1]
+                        return "error", f"File not found: {filename}"
+                    return "error", str(err)[:64]
+                return "error", str(err)[:64]
+            total_lines = data.get("total_lines", 0)
+            # Calculate actual read lines from content, not total
+            content = data.get("content") or ""
+            if content:
+                read_lines = content.rstrip("\n").count("\n") + 1 if content.strip() else 0
+            else:
+                read_lines = 0
+            size_str = _content_kb(data)
+            if total_lines > 0 and read_lines > 0 and read_lines < total_lines:
+                msg = f"{read_lines}/{total_lines} lines{size_str}"
+                if args and args.get("offset", 1) > 1:
+                    msg += f" (offset={args['offset']})"
+                return "success", msg
+            elif total_lines > 0:
+                return "success", f"{total_lines} lines{size_str}"
+            elif read_lines > 0:
+                return "success", f"{read_lines} lines{size_str}"
+        return "success", "OK"
+
+    # ── write_file ──
+    if tool_name == "write_file":
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                err = data.get("error") or data.get("message", "error")
+                return "error", str(err)[:64]
+            bytes_written = data.get("bytes_written", 0)
+            lint = data.get("lint")
+            if lint and isinstance(lint, dict) and lint.get("status") == "error":
+                return "warning", "lint error"
+            return "success", f"{bytes_written} bytes"
+        return "success", "OK"
+
+    # ── patch ──
+    if tool_name == "patch":
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                err = data.get("error") or data.get("message", "error")
+                return "error", str(err)[:64]
+            if data.get("success") is True:
+                n_files = data.get("files_modified", 1)
+                return "success", f"{n_files} file{'s' if n_files != 1 else ''}"
+        return "success", "OK"
+
+    # ── search_files ──
+    if tool_name == "search_files":
+        if isinstance(data, dict):
+            tc = data.get("total_count", 0)
+            if tc == 0:
+                return "warning", "no matches"
+            return "success", f"{tc} match{'es' if tc != 1 else ''}"
+        return "success", "OK"
+
+    # ── skill_view ──
+    if tool_name == "skill_view":
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                err = data.get("error") or "not found"
+                return "error", str(err)[:64]
+            if data.get("success") is True:
+                size_str = _content_kb(data)
+                return "success", f"loaded{size_str}"
+        return "success", "OK"
+
+    # ── skill_manage ──
+    if tool_name == "skill_manage":
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                err = data.get("error") or data.get("message", "failed")
+                return "error", str(err)[:64]
+            return "success", "OK"
+        return "success", "OK"
+
+    # ── memory ──
+    if tool_name == "memory":
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                err = data.get("error", "")
+                if "exceed" in str(err).lower() or "limit" in str(err).lower():
+                    return "warning", "memory full"
+                return "error", str(err)[:64]
+            return "success", "OK"
+        return "success", "OK"
+
+    # ── todo ──
+    if tool_name == "todo":
+        if isinstance(data, dict):
+            summary = data.get("summary", {})
+            total = summary.get("total", 0)
+            done = summary.get("completed", 0)
+            if total > 0:
+                if done > 0:
+                    return "success", f"{done}/{total} task(s)"
+                return "success", f"{total} task(s)"
+        return "success", "OK"
+
+    # ── session_search / search_memory ──
+    if tool_name in ("session_search", "search_memory"):
+        if isinstance(data, dict):
+            # Error result (from memsinker hooks: {"error": "..."})
+            if data.get("error"):
+                return "error", str(data["error"])[:64]
+            count = data.get("count", 0) or len(data.get("results", []))
+            if data.get("success") is False:
+                err = data.get("error") or data.get("message", "")
+                return "error", str(err)[:64]
+            if count == 0:
+                return "warning", "no results"
+            return "success", f"{count} result{'s' if count != 1 else ''}"
+        # search_memory returns a raw JSON array [item, ...]
+        if tool_name == "search_memory" and isinstance(data, list):
+            count = len(data)
+            if count == 0:
+                return "warning", "no results"
+            return "success", f"{count} result{'s' if count != 1 else ''}"
+        return "success", "OK"
+
+    # ── cronjob ──
+    if tool_name == "cronjob":
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                err = data.get("error") or data.get("message", "failed")
+                return "error", str(err)[:64]
+            return "success", "OK"
+        return "success", "OK"
+
+    # ── delegate_task ──
+    if tool_name == "delegate_task":
+        if isinstance(data, dict):
+            results = data.get("results", [])
+            if isinstance(results, list):
+                n = len(results)
+                return "success", f"{n} task{'s' if n != 1 else ''}"
+        return "success", "OK"
+
+    # ── send_message ──
+    if tool_name == "send_message":
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                err = data.get("error") or "failed to send"
+                return "error", str(err)[:64]
+            return "success", "sent"
+        return "success", "OK"
+
+    # ── clarify ──
+    if tool_name == "clarify":
+        if isinstance(data, dict):
+            if data.get("user_response"):
+                return "success", "answered"
+        return "success", "OK"
+
+    # ── skills_list ──
+    if tool_name == "skills_list":
+        if isinstance(data, dict):
+            if data.get("success") is False:
+                err = data.get("error") or "failed"
+                return "error", str(err)[:64]
+            n = data.get("count", len(data.get("skills", [])))
+            return "success", f"{n} skills"
+        return "success", "OK"
+
+    # ── obsidian_read ──
+    if tool_name == "obsidian_read":
+        if isinstance(data, dict):
+            if data.get("success") is False or "error" in data:
+                err = data.get("error") or "failed"
+                return "error", str(err)[:64]
+            content = data.get("content", "")
+            if content:
+                kb = len(content.encode("utf-8")) / 1024
+                if kb >= 100:
+                    return "success", f"loaded {kb:.0f}KB"
+                elif kb >= 1:
+                    return "success", f"loaded {kb:.1f}KB"
+                return "success", f"{len(content)} chars"
+            structure = data.get("structure")
+            if structure:
+                return "success", f"{len(structure)} headings ({data.get('size', 0)} bytes)"
+            return "success", "OK"
+        return "success", "OK"
+
+    # ── Generic: check for error/success keys ──
+    if isinstance(data, dict):
+        # Tool-registered result classifier (embedding mode)
+        from tools.registry import registry as _registry
+        classifier = _registry.get_result_classifier(tool_name)
+        if classifier is not None:
+            try:
+                classified = classifier(data)
+                if classified is not None:
+                    return classified
+            except Exception:
+                pass
+        if data.get("success") is False or "error" in data:
+            err = data.get("error") or data.get("message", "failed")
+            return "error", str(err)[:64]
+        return "success", "OK"
+
+    # Non-dict result string — heuristic
+    if not isinstance(result, str):
+        return "success", "OK"
+    # Show size for substantial plain-string results (e.g. obsidian_read, raw tool output)
+    if len(result) > 100:
+        kb = len(result.encode("utf-8")) / 1024
+        if kb >= 100:
+            return "success", f"loaded {kb:.0f}KB"
+        elif kb >= 1:
+            return "success", f"loaded {kb:.1f}KB"
+        return "success", f"{len(result)} chars"
+    lower = result[:500].lower()
+    if '\"error\"' in lower or '\"failed\"' in lower or result.startswith("Error"):
+        return "error", "error"
+
+    return "success", "OK"
+
+
+# Backward-compatibility shim for run_agent.py and tool_executor.py
+
+
+def display_width(s: str) -> int:
+    """Compute display width accounting for CJK wide characters."""
+    w = 0
+    for ch in s:
+        if '\u4e00' <= ch <= '\u9fff' or '\u3000' <= ch <= '\u303f' or '\uff00' <= ch <= '\uffef':
+            w += 2
+        else:
+            w += 1
+    return w
+
+
+
+
 def _get_cute_tool_message(
     tool_name: str, args: dict, duration: float, result: str | None = None,
 ) -> str:
-    """Generate a formatted tool completion line for CLI quiet mode.
+    """Generate a formatted tool completion line for CLI and Gateway.
 
-    Format: ``| {emoji} {verb:9} {detail}  {duration}``
+    Format: ``┊ {emoji} ⏩【{input}】 {result}  {duration} {status_icon}``
 
-    When *result* is provided the line is checked for failure indicators.
-    Failed tool calls get a red prefix and an informational suffix.
+    Shows both the INPUT (command/path/query — what was called) and RESULT
+    (what happened — "OK", "5 results", "exit 1: cmd not found"), separated
+    by 【】 brackets with a ⏩ arrow.  When no input can be extracted from
+    *args*, falls back to showing only the result.  A status icon (✅ success
+    / ⚠️ warning / ❌ error) is appended for quick visual scanning.  The ⏩
+    provides visual distinction from the tool start line.  Text labels
+    (search, read, exec, …) are stripped — only the tool emoji is kept.
     """
-    args = redact_tool_args_for_display(tool_name, args) or args
     dur = f"{duration:.1f}s"
-    is_failure, failure_suffix = _detect_tool_failure(tool_name, result)
+    status, msg = _classify_tool_result(tool_name, result, args=args)
+    icon = _STATUS_ICONS.get(status, "")
     skin_prefix = get_skin_tool_prefix()
 
-    def _trunc(s, n=40):
+    def _trunc(s, n=256):
         s = str(s)
         if _tool_preview_max_len == 0:
             return s  # no limit
-        limit = _tool_preview_max_len
+        limit = max(n, _tool_preview_max_len)
         return (s[:limit-3] + "...") if len(s) > limit else s
 
-    def _path(p, n=35):
-        p = str(p)
-        if _tool_preview_max_len == 0:
-            return p  # no limit
-        limit = _tool_preview_max_len
-        return ("..." + p[-(limit-3):]) if len(p) > limit else p
-
-    def _wrap(line: str) -> str:
-        """Apply skin tool prefix and failure suffix."""
+    def _fmt(line: str) -> str:
+        """Apply skin tool prefix and append status icon."""
         if skin_prefix != "┊":
             line = line.replace("┊", skin_prefix, 1)
-        if not is_failure:
-            return line
-        return f"{line}{failure_suffix}"
+        return f"{line} {icon}"
 
+    def _trunc_middle(s, n=48):
+        """保留前后，中间省略号压缩"""
+        s = str(s)
+        if len(s) <= n:
+            return s
+        half = (n - 3) // 2
+        return s[:half] + "..." + s[-half:]
+
+    def _completion(prefix: str, tname: str, args_dict: dict, result_msg: str, dur_s: str) -> str:
+        """Build completion line with inline args.
+
+        Format: ``┊ {emoji} 🌗{input}🌓 {result}  {dur} {icon}``
+
+        Input wrapped in 🌗🌓 (moon brackets), truncated to 24 chars
+        with head+tail preserved.  Text label stripped from prefix—only
+        ┊ and the tool emoji are kept.
+        """
+        # Keep only ┊ and the tool emoji from prefix (discard text label)
+        parts = prefix.strip().split(None, 2)
+        emoji_prefix = " ".join(parts[:2]) if len(parts) >= 2 else prefix.strip()
+        inp = build_tool_preview(tname, args_dict) if args_dict is not None else None
+        if tname == "web_extract" and args_dict is not None:
+            # Use upstream domain extraction (handles dict url/href from
+            # web_search passthrough, #61693); empty urls → "pages".
+            _urls = args_dict.get("urls", [])
+            if _urls:
+                _url = _display_url(_urls[0] if isinstance(_urls, list) else _urls)
+                if _url:
+                    _domain = _url.replace("https://", "").replace("http://", "").split("/")[0]
+                    _extra = f" +{len(_urls)-1}" if isinstance(_urls, list) and len(_urls) > 1 else ""
+                    inp = f"{_domain}{_extra}"
+                else:
+                    inp = "pages"
+            else:
+                inp = "pages"
+        if inp:
+            # Respect the configured preview limit (set_tool_preview_max_len);
+            # fall back to the narrow 24-char default for CLI display space.
+            _limit = _tool_preview_max_len if _tool_preview_max_len > 0 else 24
+            inp_display = _trunc_middle(inp, _limit)
+            return _fmt(f"{emoji_prefix} 🌗{inp_display}🌓 {result_msg}  {dur_s}")
+        else:
+            return _fmt(f"{emoji_prefix} {result_msg}  {dur_s}")
+
+    # ── web_search ──
     if tool_name == "web_search":
-        return _wrap(f"┊ 🔍 search    {_trunc(args.get('query', ''), 42)}  {dur}")
+        return _completion("┊ 🔍 search    ", "web_search", args, msg, dur)
+
+    # ── web_extract ──
     if tool_name == "web_extract":
-        urls = args.get("urls", [])
-        if urls:
-            url = _display_url(urls[0] if isinstance(urls, list) else urls)
-            if not url:
-                return _wrap(f"┊ 📄 fetch     pages  {dur}")
-            domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-            extra = f" +{len(urls)-1}" if isinstance(urls, list) and len(urls) > 1 else ""
-            return _wrap(f"┊ 📄 fetch     {_trunc(domain, 35)}{extra}  {dur}")
-        return _wrap(f"┊ 📄 fetch     pages  {dur}")
+        return _completion("┊ 📄 fetch     ", "web_extract", args, msg, dur)
+
+    # ── web_crawl ──
+    if tool_name == "web_crawl":
+        return _completion("┊ 🕸️  crawl     ", "web_crawl", args, msg, dur)
+
+    # ── terminal ──
     if tool_name == "terminal":
-        return _wrap(f"┊ 💻 $         {_trunc(build_tool_preview(tool_name, args) or args.get('command', ''), 42)}  {dur}")
+        return _completion("┊ 💻           ", "terminal", args, msg, dur)
+
+    # ── execute_code ──
+    if tool_name == "execute_code":
+        return _completion("┊ 🐍 exec      ", "execute_code", args, msg, dur)
+
+    # ── process ──
     if tool_name == "process":
         action = args.get("action", "?")
         sid = args.get("session_id", "")[:12]
         labels = {"list": "ls processes", "poll": f"poll {sid}", "log": f"log {sid}",
                   "wait": f"wait {sid}", "kill": f"kill {sid}", "write": f"write {sid}", "submit": f"submit {sid}"}
-        return _wrap(f"┊ ⚙️  proc      {labels.get(action, f'{action} {sid}')}  {dur}")
+        return _completion("┊ ⚙️  proc ", "process", args, msg, dur)
     if tool_name == "read_file":
-        return _wrap(f"┊ 📖 read      {_trunc(build_tool_preview(tool_name, args) or args.get('path', ''), 42)}  {dur}")
+        return _completion("┊ 📖 read      ", "read_file", args, msg, dur)
     if tool_name == "write_file":
-        return _wrap(f"┊ ✍️  write     {_path(args.get('path', ''))}  {dur}")
+        return _completion("┊ ✍️  write     ", "write_file", args, msg, dur)
     if tool_name == "patch":
-        return _wrap(f"┊ 🔧 patch     {_path(args.get('path', ''))}  {dur}")
+        return _completion("┊ 🔧 patch     ", "patch", args, msg, dur)
     if tool_name == "search_files":
-        pattern = _trunc(args.get("pattern", ""), 35)
+        pattern = _trunc(args.get("pattern", ""), 64)
         target = args.get("target", "content")
         verb = "find" if target == "files" else "grep"
-        return _wrap(f"┊ 🔎 {verb:9} {pattern}  {dur}")
+        return _completion("┊ 📂 grep      ", "search_files", args, msg, dur)
     if tool_name == "browser_navigate":
         url = args.get("url", "")
         domain = url.replace("https://", "").replace("http://", "").split("/")[0]
-        return _wrap(f"┊ 🌐 navigate  {_trunc(domain, 35)}  {dur}")
+        return _completion("┊ 🌐 navigate  ", "browser_navigate", args, msg, dur)
     if tool_name == "browser_snapshot":
         mode = "full" if args.get("full") else "compact"
-        return _wrap(f"┊ 📸 snapshot  {mode}  {dur}")
+        return _completion("┊ 📸 snapshot  ", "browser_snapshot", args, msg, dur)
     if tool_name == "browser_click":
-        return _wrap(f"┊ 👆 click     {args.get('ref', '?')}  {dur}")
+        return _completion("┊ 👆 click     ", "browser_click", args, msg, dur)
     if tool_name == "browser_type":
-        return _wrap(f"┊ ⌨️  type      \"{_trunc(args.get('text', ''), 30)}\"  {dur}")
+        return _completion("┊ ⌨️  type      ", "browser_type", args, msg, dur)
     if tool_name == "browser_scroll":
         d = args.get("direction", "down")
         arrow = {"down": "↓", "up": "↑", "right": "→", "left": "←"}.get(d, "↓")
-        return _wrap(f"┊ {arrow}  scroll    {d}  {dur}")
+        return _completion("┊ ↕️  scroll    ", "browser_scroll", args, msg, dur)
     if tool_name == "browser_back":
-        return _wrap(f"┊ ◀️  back      {dur}")
+        return _completion("┊ ◀️  back      ", "browser_back", args, msg, dur)
     if tool_name == "browser_press":
-        return _wrap(f"┊ ⌨️  press     {args.get('key', '?')}  {dur}")
+        return _completion("┊ ⌨️  press     ", "browser_press", args, msg, dur)
     if tool_name == "browser_get_images":
-        return _wrap(f"┊ 🖼️  images    extracting  {dur}")
+        return _completion("┊ 🖼️  images    ", "browser_get_images", args, msg, dur)
     if tool_name == "browser_vision":
-        return _wrap(f"┊ 👁️  vision    analyzing page  {dur}")
+        return _completion("┊ 👁️  vision    ", "browser_vision", args, msg, dur)
     if tool_name == "todo":
-        todos_arg = args.get("todos")
-        merge = args.get("merge", False)
-        # Parse result for completion progress
-        total = 0
-        done = 0
-        if result:
-            try:
-                data = safe_json_loads(result)
-                if data:
-                    s = data.get("summary", {})
-                    total = s.get("total", 0)
-                    done = s.get("completed", 0)
-            except Exception:
-                pass
-        if todos_arg is None:
-            if total > 0:
-                return _wrap(f"┊ 📋 plan      {done}/{total} task(s)  {dur}")
-            return _wrap(f"┊ 📋 plan      reading tasks  {dur}")
-        elif merge:
-            if total > 0 and done > 0:
-                return _wrap(f"┊ 📋 plan      update {done}/{total} ✓  {dur}")
-            return _wrap(f"┊ 📋 plan      update {len(todos_arg)} task(s)  {dur}")
-        else:
-            if total > 0 and done > 0:
-                return _wrap(f"┊ 📋 plan      {done}/{total} task(s)  {dur}")
-            return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
+        return _completion("┊ 📋 plan      ", "todo", args, msg, dur)
     if tool_name == "session_search":
-        return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
+        return _completion("┊ 🕐 recall    ", "session_search", args, msg, dur)
     if tool_name == "memory":
-        action = args.get("action", "?")
-        target = args.get("target", "")
-        if action == "add":
-            return _wrap(f"┊ 🧠 memory    +{target}: \"{_trunc(args.get('content', ''), 30)}\"  {dur}")
-        elif action == "replace":
-            old = args.get("old_text") or ""
-            old = old if old else "<missing old_text>"
-            return _wrap(f"┊ 🧠 memory    ~{target}: \"{_trunc(old, 20)}\"  {dur}")
-        elif action == "remove":
-            old = args.get("old_text") or ""
-            old = old if old else "<missing old_text>"
-            return _wrap(f"┊ 🧠 memory    -{target}: \"{_trunc(old, 20)}\"  {dur}")
-        return _wrap(f"┊ 🧠 memory    {action}  {dur}")
+        return _completion("┊ 🧠 memory    ", "memory", args, msg, dur)
     if tool_name == "skills_list":
-        return _wrap(f"┊ 📚 skills    list {args.get('category', 'all')}  {dur}")
+        return _completion("┊ 📚 skills    ", "skills_list", args, msg, dur)
     if tool_name == "skill_view":
-        label = args.get("name", "")
-        file_path = args.get("file_path")
-        if file_path:
-            label = f"{label} → {file_path}" if label else str(file_path)
-        return _wrap(f"┊ 📚 skill     {_trunc(label, 44)}  {dur}")
+        return _completion("┊ 📚 skill     ", "skill_view", args, msg, dur)
     if tool_name == "image_generate":
-        return _wrap(f"┊ 🎨 create    {_trunc(args.get('prompt', ''), 35)}  {dur}")
+        return _completion("┊ 🎨 create    ", "image_generate", args, msg, dur)
     if tool_name == "text_to_speech":
-        return _wrap(f"┊ 🔊 speak     {_trunc(args.get('text', ''), 30)}  {dur}")
+        return _completion("┊ 🔊 speak     ", "text_to_speech", args, msg, dur)
     if tool_name == "vision_analyze":
-        return _wrap(f"┊ 👁️  vision    {_trunc(args.get('question', ''), 30)}  {dur}")
+        return _completion("┊ 👁️  vision    ", "vision_analyze", args, msg, dur)
+    if tool_name == "mixture_of_agents":
+        return _completion("┊ 🧠 reason    ", "mixture_of_agents", args, msg, dur)
     if tool_name == "send_message":
-        return _wrap(f"┊ 📨 send      {args.get('target', '?')}: \"{_trunc(args.get('message', ''), 25)}\"  {dur}")
+        return _completion("┊ 📨 send      ", "send_message", args, msg, dur)
     if tool_name == "cronjob":
-        action = args.get("action", "?")
-        if action == "create":
-            skills = args.get("skills") or ([] if not args.get("skill") else [args.get("skill")])
-            label = args.get("name") or (skills[0] if skills else None) or args.get("prompt", "task")
-            return _wrap(f"┊ ⏰ cron      create {_trunc(label, 24)}  {dur}")
-        if action == "list":
-            return _wrap(f"┊ ⏰ cron      listing  {dur}")
-        return _wrap(f"┊ ⏰ cron      {action} {args.get('job_id', '')}  {dur}")
-    if tool_name == "execute_code":
-        code = args.get("code", "")
-        first_line = code.strip().split("\n")[0] if code.strip() else ""
-        return _wrap(f"┊ 🐍 exec      {_trunc(first_line, 35)}  {dur}")
+        return _completion("┊ ⏰ cron      ", "cronjob", args, msg, dur)
     if tool_name == "delegate_task":
-        tasks = args.get("tasks")
-        if tasks and isinstance(tasks, list):
-            task_count, goals = _delegate_task_goal_parts(tasks, per_goal_len=30)
-            detail = " | ".join(goals) if goals else "parallel"
-            count_label = task_count or len(tasks)
-            return _wrap(f"┊ 🔀 delegate  {count_label}x: {_trunc(detail, 35)}  {dur}")
-        return _wrap(f"┊ 🔀 delegate  {_trunc(args.get('goal', ''), 35)}  {dur}")
+        return _completion("┊ 🔀 delegate  ", "delegate_task", args, msg, dur)
 
-    preview = build_tool_preview(tool_name, args) or ""
-    return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")
+    # ── search_memory ──
+    if tool_name == "search_memory":
+        return _completion("┊ 🧠 memsrch   ", "search_memory", args, msg, dur)
 
+    # ── clarify ──
+    if tool_name == "clarify":
+        return _completion("┊ 💬 ask       ", "clarify", args, msg, dur)
+
+    # ── generic fallback ──
+    try:
+        from tools.registry import registry
+        label = registry.get_display_label(tool_name, default=tool_name[:9])
+        emoji = registry.get_emoji(tool_name, default="⚡")
+    except Exception:
+        label = tool_name[:9]
+        emoji = "⚡"
+    return _completion(f"┊ {emoji} {label[:9]:9} ", tool_name, args, msg, dur)
+
+
+
+# ===
+# Pair Watcher display box — ANSI-styled bordered output (§3.6)
+# ===
+# Pair Watcher display box — ANSI-styled bordered output (§3.6)
+# ===
 
 def get_cute_tool_message(
     tool_name: str, args: dict, duration: float, result: str | None = None,

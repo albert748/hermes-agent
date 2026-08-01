@@ -27,7 +27,7 @@ class TestTodoRead:
 
     def test_read_no_result(self):
         msg = get_cute_tool_message("todo", {}, 0.5)
-        assert "reading tasks" in msg
+        assert "reading task list" in msg
         assert "0.5s" in msg
 
 
@@ -36,7 +36,7 @@ class TestTodoRead:
         """Edge case: empty todo list returns summary with total=0."""
         msg = get_cute_tool_message("todo", {}, 0.5,
                                     result=_todo_result(0, 0))
-        assert "reading tasks" in msg
+        assert "reading task list" in msg
 
 
 
@@ -77,7 +77,7 @@ class TestTodoUpdate:
         msg = get_cute_tool_message("todo",
                                     {"todos": [{"id": "a", "status": "completed"}],
                                      "merge": True}, 0.5)
-        assert "update 1 task(s)" in msg
+        assert "updating 1 task(s)" in msg
 
 
     def test_update_halfway(self):
@@ -88,7 +88,7 @@ class TestTodoUpdate:
                                     0.7,
                                     result=_todo_result(4, 2))
         assert "2/4" in msg
-        assert "✓" in msg
+        assert "✅" in msg
 
 
 
@@ -101,8 +101,8 @@ class TestTodoUpdate:
                                      "merge": True},
                                     0.3,
                                     result=json.dumps({"summary": {"completed": 2}}))
-        assert "update 1 task(s)" in msg
-        assert "✓" not in msg
+        assert "updating 1 task(s)" in msg
+        assert "/" not in msg  # no progress fraction without total
 
 
 

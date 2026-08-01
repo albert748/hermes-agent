@@ -112,7 +112,7 @@ class TestGetCuteToolMessageFailureSuffix:
             0.05,
             result=fail,
         )
-        assert "[full]" in line
+        assert "memory full" in line
 
     def test_success_has_no_suffix(self):
         ok = json.dumps({"success": True, "data": "hi"})
