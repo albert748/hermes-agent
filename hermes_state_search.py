@@ -1510,6 +1510,11 @@ class SessionSearchMixin:
         is_cjk = self._contains_cjk(query)
         if is_cjk:
             raw_query = query.strip('"').strip()
+            # Strip trailing FTS5 prefix-wildcard (*) added by callers such as
+            # web_server's search_sessions.  In the CJK trigram path the *
+            # inside quotes breaks FTS5 syntax; in the LIKE fallback path *
+            # is a literal character that will never match.
+            raw_query = raw_query.rstrip("*")
             cjk_count = self._count_cjk(raw_query)
 
             # Per-token CJK length check (#20494): trigram needs >=3 CJK chars
@@ -2074,6 +2079,36 @@ class SessionSearchMixin:
             key=lambda item: (score(item[1]), item[0]),
         )
         return [row for _, row in ranked[:limit]]
+
+    def search_sessions_by_title(
+        self,
+        query: str,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Search sessions whose title contains *query* (LIKE substring match).
+
+        LIKE wildcards (%, _) in *query* are escaped so they are treated as
+        literal characters.  Returns session dicts with ``id``, ``title``,
+        ``source``, ``model``, and ``started_at``.
+        """
+        if not query or not query.strip():
+            return []
+        escaped = (
+            query.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        like_pattern = f"%{escaped}%"
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT id, title, source, model, started_at "
+                "FROM sessions "
+                "WHERE title IS NOT NULL AND title LIKE ? ESCAPE '\\' "
+                "ORDER BY started_at DESC "
+                "LIMIT ?",
+                (like_pattern, limit),
+            )
+            return [dict(row) for row in cursor.fetchall()]
 
     def _fts_table_exists(self, name: str) -> bool:
         """True if an FTS5 virtual table is queryable in this DB."""

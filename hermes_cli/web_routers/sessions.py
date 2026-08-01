@@ -379,6 +379,25 @@ async def search_sessions(
                         "session_started": m.get("session_started"),
                     },
                 )
+            # ── Title search (LIKE) ──────────────────────────────────
+            # Surface sessions whose title contains the query but have no
+            # matching message content (search_messages only indexes messages).
+            title_matches = db.search_sessions_by_title(q.strip(), limit=safe_limit)
+            for row in title_matches:
+                sid = row["id"]
+                if sid in seen:
+                    continue  # already found via FTS5 — keep the message snippet
+                add_lineage_result(
+                    sid,
+                    {
+                        "snippet": f'Title: {row["title"]}',
+                        "role": None,
+                        "source": row["source"],
+                        "model": row["model"],
+                        "session_started": row["started_at"],
+                    },
+                )
+
             return {"results": list(seen.values())}
         finally:
             db.close()
