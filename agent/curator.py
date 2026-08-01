@@ -1905,6 +1905,7 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
     _acp_command = None
     _acp_args = None
     _model_name = ""
+    _reasoning_config = None
     try:
         from hermes_cli.config import load_config_readonly
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -1929,6 +1930,25 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
         _max_tokens = _rp.get("max_output_tokens")
         _acp_command = _rp.get("command")
         _acp_args = list(_rp.get("args") or [])
+        # Resolve reasoning config from auxiliary.curator.reasoning_effort,
+        # same pattern as delegation (delegate_tool.py). The config key
+        # exists upstream but is not wired; this is the local port of
+        # 6e151c2a3 (fix(reasoning)).
+        _reasoning_config = None
+        try:
+            _cur_task = (_cfg.get("auxiliary") or {}).get("curator", {})
+            _effort = str(_cur_task.get("reasoning_effort", "") or "").strip()
+            if _effort:
+                from hermes_constants import parse_reasoning_effort
+                _reasoning_config = parse_reasoning_effort(_effort)
+                if _reasoning_config is None and _effort:
+                    logger.warning(
+                        "Unknown auxiliary.curator.reasoning_effort '%s', "
+                        "using provider default",
+                        _effort,
+                    )
+        except Exception:
+            pass
         if isinstance(_rp.get("model"), str) and _rp["model"].strip():
             _model_name = _rp["model"].strip()
     except Exception as e:
@@ -1953,6 +1973,7 @@ def _run_llm_review(prompt: str) -> Dict[str, Any]:
             api_mode=_api_mode,
             credential_pool=_credential_pool,
             request_overrides=_request_overrides,
+            reasoning_config=_reasoning_config,
             **_agent_kwargs,
             enabled_toolsets=["skills", "terminal"],
             # Umbrella-building over a large skill collection is worth a
