@@ -12032,9 +12032,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         from agent.display import get_tool_emoji
         emoji = get_tool_emoji(tool_name, default="⚡")
-        # NOTE: 本地定制（7fb141042）删除上游 "preparing {tool}…" 占位行。
-        # 参数流式生成期间保持安静，避免与工具完成行（🌗input🌓 result）视觉噪音。
-        # 滚动历史由 tool.completed 的 stacked line 保证（见 _on_tool_progress）。
+        _cprint(f"  ┊ {emoji} preparing {tool_name}…")
 
     # ====================================================================
     # Tool progress callback (audio cues for voice mode)
@@ -12183,13 +12181,41 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self._invalidate()
 
     def _on_tool_start(self, tool_call_id: str, function_name: str, function_args: dict):
-        """Capture local before-state for write-capable tools."""
+        """Capture local before-state for write-capable tools and print args preview.
+
+        本地定制（回归修复）：打印工具开始内容行（label + args preview），
+        让用户立即看到"到底在执行什么"（如 run ls -la / read path）。
+        上游 v2026.7.30 移除了此打印，只剩 snapshot 捕获。
+        """
         try:
-            from agent.display import capture_local_edit_snapshot
+            from agent.display import capture_local_edit_snapshot, get_tool_emoji, build_tool_preview
 
             snapshot = capture_local_edit_snapshot(function_name, function_args)
             if snapshot is not None:
                 self._pending_edit_snapshots[tool_call_id] = snapshot
+
+            # Print args preview so user sees what's happening immediately
+            emoji = get_tool_emoji(function_name, default="⚡")
+            preview = build_tool_preview(function_name, function_args)
+            # Map tool names to short readable labels
+            _LABELS = {
+                "skill_view": "view skill", "skill_manage": "manage skill",
+                "skills_list": "list skills", "search_files": "grep",
+                "read_file": "read", "write_file": "write", "patch": "patch",
+                "web_search": "search", "web_extract": "fetch",
+                "terminal": "run", "execute_code": "exec",
+                "memory": "mem", "todo": "plan", "delegate_task": "delegate",
+                "cronjob": "cron", "process": "proc",
+            }
+            label = _LABELS.get(function_name, function_name)
+            if preview:
+                from agent.display import get_tool_preview_max_len
+                _pl = get_tool_preview_max_len() or 512  # config or 2× original 256
+                if len(preview) > _pl:
+                    preview = preview[:_pl - 3] + "..."
+                _cprint(f"  ┊ {emoji} {label}  {preview}")
+            else:
+                _cprint(f"  ┊ {emoji} {label}")
         except Exception:
             logger.debug("Edit snapshot capture failed for %s", function_name, exc_info=True)
 
