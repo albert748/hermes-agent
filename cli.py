@@ -12032,7 +12032,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         from agent.display import get_tool_emoji
         emoji = get_tool_emoji(tool_name, default="⚡")
-        _cprint(f"  ┊ {emoji} preparing {tool_name}…")
+        # NOTE: 本地定制（7fb141042）删除上游 "preparing {tool}…" 占位行。
+        # 参数流式生成期间保持安静，避免与工具完成行（🌗input🌓 result）视觉噪音。
+        # 滚动历史由 tool.completed 的 stacked line 保证（见 _on_tool_progress）。
 
     # ====================================================================
     # Tool progress callback (audio cues for voice mode)
