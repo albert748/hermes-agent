@@ -12032,7 +12032,6 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
 
         from agent.display import get_tool_emoji
         emoji = get_tool_emoji(tool_name, default="⚡")
-        _cprint(f"  ┊ {emoji} preparing {tool_name}…")
 
     # ====================================================================
     # Tool progress callback (audio cues for voice mode)
@@ -12181,12 +12180,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             self._invalidate()
 
     def _on_tool_start(self, tool_call_id: str, function_name: str, function_args: dict):
-        """Capture local before-state for write-capable tools and print args preview.
-
-        本地定制（回归修复）：打印工具开始内容行（label + args preview），
-        让用户立即看到"到底在执行什么"（如 run ls -la / read path）。
-        上游 v2026.7.30 移除了此打印，只剩 snapshot 捕获。
-        """
+        """Capture local before-state for write-capable tools and print args preview."""
         try:
             from agent.display import capture_local_edit_snapshot, get_tool_emoji, build_tool_preview
 
