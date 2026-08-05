@@ -1251,6 +1251,27 @@ class TestBulkDeleteSessions:
         assert not (tmp_path / "s1.jsonl").exists()
         assert not (tmp_path / "s2.json").exists()
 
+    def test_cleans_up_session_snapshot_json(self, db, tmp_path):
+        """run_agent's opt-in json-snapshot writer (sessions.write_json_snapshots)
+        leaves ``session_{sid}.json`` beside the transcripts; delete must sweep
+        it too — not just ``{sid}.json`` / ``{sid}.jsonl`` / request_dumps.
+        Regression: 2026-08-05 cleanup found 7 stale ``session_*.json`` files
+        surviving ``hermes sessions delete`` (the snapshot writer uses a
+        ``session_`` prefix that ``_remove_session_files`` never matched)."""
+        db.create_session(session_id="snap1", source="cli")
+        db.end_session("snap1", end_reason="done")
+        (tmp_path / "snap1.jsonl").write_text("")
+        (tmp_path / "snap1.json").write_text("{}")
+        (tmp_path / "session_snap1.json").write_text("{}")
+        (tmp_path / "request_dump_snap1_1.json").write_text("{}")
+
+        deleted = db.delete_session("snap1", sessions_dir=tmp_path)
+        assert deleted is True
+        assert not (tmp_path / "snap1.jsonl").exists()
+        assert not (tmp_path / "snap1.json").exists()
+        assert not (tmp_path / "session_snap1.json").exists()
+        assert not (tmp_path / "request_dump_snap1_1.json").exists()
+
 
 class TestDeleteEmptySessions:
     """``delete_empty_sessions`` sweeps every ended, non-archived session

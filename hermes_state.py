@@ -7728,7 +7728,9 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
     def _remove_session_files(sessions_dir: Optional[Path], session_id: str) -> None:
         """Remove on-disk transcript files for a session.
 
-        Cleans up ``{session_id}.json``, ``{session_id}.jsonl``, and any
+        Cleans up ``{session_id}.json``, ``{session_id}.jsonl``,
+        ``session_{session_id}.json`` (run_agent's opt-in json snapshot,
+        ``sessions.write_json_snapshots``), and any
         ``request_dump_{session_id}_*.json`` files left by the gateway.
         Silently skips files that don't exist and swallows OSError so a
         filesystem hiccup never blocks a DB operation.
@@ -7744,6 +7746,15 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # request_dump files use session_id as a prefix component
         try:
             for p in sessions_dir.glob(f"request_dump_{session_id}_*.json"):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        # run_agent's opt-in json snapshot writer prefixes the session id
+        try:
+            for p in sessions_dir.glob(f"session_{session_id}.json"):
                 try:
                     p.unlink(missing_ok=True)
                 except OSError:
