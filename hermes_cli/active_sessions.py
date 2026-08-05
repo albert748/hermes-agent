@@ -114,6 +114,19 @@ def active_session_limit_message(
     )
 
 
+def active_session_held_message(
+    session_id: str,
+    holder: str,
+    holder_pid: Optional[Any] = None,
+) -> str:
+    """Message for a session already open in another live client (exclusive)."""
+    pid_part = f" (pid {holder_pid})" if holder_pid is not None else ""
+    return (
+        f"Session {session_id} is already open in another client "
+        f"({holder}{pid_part}). Close it there first, or open a new session."
+    )
+
+
 def _state_dir() -> Path:
     return Path(get_hermes_home()) / "runtime"
 
@@ -286,17 +299,12 @@ def try_acquire_active_session(
     """Acquire an active-session slot.
 
     Returns ``(lease, None)`` on success.  When the cap is disabled, the lease is
-    a no-op object so callers can unconditionally call ``release()``.
+    still recorded (but does not count against a cap) so cross-process exclusive
+    ownership of the same session_id remains enforceable; callers can
+    unconditionally call ``release()``.
     """
     max_sessions = resolve_max_concurrent_sessions(config)
     lease_id = uuid.uuid4().hex
-    if max_sessions is None:
-        return ActiveSessionLease(
-            lease_id=lease_id,
-            session_id=session_id,
-            surface=surface,
-            enabled=False,
-        ), None
 
     now = time.time()
     entry = {
@@ -320,8 +328,28 @@ def try_acquire_active_session(
         pruned = len(raw_entries) - len(entries)
         if pruned:
             logger.info("Pruned %d stale active session lease(s)", pruned)
+        # Cross-process exclusive ownership: refuse a second client opening the
+        # same session_id while the first holder is still alive. Without this,
+        # two backends (TUI process vs Desktop→dashboard process) each build a
+        # live agent for the same session row and write state.db concurrently,
+        # forking the conversation (lost messages, phantom sessions).
+        for existing in entries:
+            if str(existing.get("session_id") or "") == str(session_id):
+                _write_entries(state_path, entries)
+                holder = str(existing.get("surface") or "unknown")
+                holder_pid = existing.get("pid")
+                logger.info(
+                    "Active session %s already held by %s (pid=%s); refusing %s",
+                    session_id,
+                    holder,
+                    holder_pid,
+                    surface,
+                )
+                return None, active_session_held_message(
+                    session_id, holder, holder_pid
+                )
         active_count = len(entries)
-        if active_count >= max_sessions:
+        if max_sessions is not None and active_count >= max_sessions:
             _write_entries(state_path, entries)
             logger.info(
                 "Active session limit reached: active=%d max=%d surface=%s",
