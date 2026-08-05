@@ -651,7 +651,8 @@ def _claim_active_session_slot(
     surface: str = "tui",
     profile_home: str | Path | None = None,
 ) -> tuple[Any, str | None]:
-    track_liveness = str(surface or "").strip().lower() == "desktop"
+    track_liveness = True  # local: all client surfaces record leases so the
+    # cross-process exclusive-ownership check stays enforceable (TUI vs Desktop)
     try:
         from hermes_cli.active_sessions import try_acquire_active_session
 
@@ -665,9 +666,14 @@ def _claim_active_session_slot(
         )
     except Exception as exc:
         logger.warning("Failed to claim active session slot: %s", exc)
+        # upstream: track_liveness=True (desktop) fails closed. Local keeps
+        # every surface recording leases for the exclusive-ownership check,
+        # but non-desktop surfaces stay fail-open (upstream contract: TUI/CLI
+        # must not be blocked by the registry being unavailable — they answer
+        # the user, desktop is the strict surface).
         return (
             (None, _SESSION_OWNERSHIP_UNAVAILABLE)
-            if track_liveness
+            if str(surface or "").strip().lower() == "desktop"
             else (None, None)
         )
 

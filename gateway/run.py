@@ -10666,6 +10666,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "chat_id": getattr(source, "chat_id", "") or "",
                     "user_id": getattr(source, "user_id", "") or "",
                 },
+                track_liveness=True,  # local: exclusive ownership check
             )
         except Exception as exc:
             logger.warning("Failed to claim active session slot: %s", exc)

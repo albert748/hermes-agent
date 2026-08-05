@@ -5833,6 +5833,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 session_id=self.session_id,
                 surface=surface,
                 config=self.config,
+                track_liveness=True,  # local: exclusive ownership check
             )
         except Exception as exc:
             logger.warning("Failed to claim active session slot: %s", exc)

@@ -124,6 +124,19 @@ def _registry_home(registry_home: str | Path | None = None) -> Path:
     return Path(registry_home) if registry_home is not None else Path(get_hermes_home())
 
 
+def active_session_held_message(
+    session_id: str,
+    holder: str,
+    holder_pid: Optional[Any] = None,
+) -> str:
+    """Message for a session already open in another live client (exclusive)."""
+    pid_part = f" (pid {holder_pid})" if holder_pid is not None else ""
+    return (
+        f"Session {session_id} is already open in another client "
+        f"({holder}{pid_part}). Close it there first, or open a new session."
+    )
+
+
 def _state_dir(registry_home: str | Path | None = None) -> Path:
     return _registry_home(registry_home) / "runtime"
 
@@ -492,6 +505,33 @@ def try_acquire_active_session(
         pruned = len(raw_entries) - len(entries)
         if pruned:
             logger.info("Pruned %d stale active session lease(s)", pruned)
+        # Cross-process exclusive ownership: refuse a second client opening the
+        # same session_id while the first holder is still alive. Without this,
+        # two backends (TUI process vs Desktop→dashboard process) each build a
+        # live agent for the same session row and write state.db concurrently,
+        # forking the conversation (lost messages, phantom sessions).
+        for existing in entries:
+            if str(existing.get("session_id") or "") != str(session_id):
+                continue
+            # Same-surface overlaps are handled by upstream sibling/orphan
+            # liveness semantics (a second Desktop backend is a sibling, the
+            # cleanup rounds preserve it). The exclusive check targets
+            # cross-client forks (TUI vs Desktop vs CLI vs gateway).
+            if str(existing.get("surface") or "") == surface:
+                continue
+            _write_entries(state_path, entries)
+            holder = str(existing.get("surface") or "unknown")
+            holder_pid = existing.get("pid")
+            logger.info(
+                "Active session %s already held by %s (pid=%s); refusing %s",
+                session_id,
+                holder,
+                holder_pid,
+                surface,
+            )
+            return None, active_session_held_message(
+                session_id, holder, holder_pid
+            )
         active_count = len(entries)
         if max_sessions is not None and active_count >= max_sessions:
             _write_entries(state_path, entries)

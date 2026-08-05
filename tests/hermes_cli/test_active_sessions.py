@@ -560,3 +560,64 @@ def test_release_wins_against_transfer_waiting_on_same_lease_lock(
     assert lease.released is True
     assert active_sessions.active_session_registry_snapshot() == []
 
+def test_same_session_id_rejected_while_holder_alive(tmp_path, monkeypatch):
+    """A second client opening the same session_id must be refused (exclusive)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    cfg = {"max_concurrent_sessions": 10}
+
+    first, msg = active_sessions.try_acquire_active_session(
+        session_id="shared-session", surface="tui", config=cfg
+    )
+    assert first is not None and msg is None
+
+    second, msg = active_sessions.try_acquire_active_session(
+        session_id="shared-session", surface="desktop", config=cfg
+    )
+    assert second is None
+    assert "already open in another client" in msg
+    assert "tui" in msg
+
+    # A different session_id still succeeds.
+    other, msg = active_sessions.try_acquire_active_session(
+        session_id="other-session", surface="desktop", config=cfg
+    )
+    assert other is not None and msg is None
+
+    first.release()
+    other.release()
+
+
+def test_same_session_rejected_with_cap_disabled(tmp_path, monkeypatch):
+    """Exclusivity must hold even when max_concurrent_sessions is unset (None)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    cfg = {}
+
+    first, msg = active_sessions.try_acquire_active_session(
+        session_id="shared", surface="cli", config=cfg, track_liveness=True
+    )
+    assert first is not None and msg is None
+
+    second, msg = active_sessions.try_acquire_active_session(
+        session_id="shared", surface="gateway", config=cfg, track_liveness=True
+    )
+    assert second is None
+    assert "already open in another client" in msg
+
+    first.release()
+
+
+def test_released_session_can_be_reacquired(tmp_path, monkeypatch):
+    """After the holder releases, the same session_id is acquirable again."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    cfg = {}
+
+    first, _ = active_sessions.try_acquire_active_session(
+        session_id="shared", surface="tui", config=cfg
+    )
+    first.release()
+
+    second, msg = active_sessions.try_acquire_active_session(
+        session_id="shared", surface="desktop", config=cfg
+    )
+    assert second is not None and msg is None
+    second.release()
