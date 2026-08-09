@@ -835,7 +835,7 @@ def _ensure_web_plugins_loaded() -> None:
         logger.warning("Web plugin discovery failed (non-fatal): %s", exc)
 
 
-def web_search_tool(query: str, limit: int = 5) -> str:
+def web_search_tool(query: str, limit: int | None = None) -> str:
     """
     Search the web for information using available search API backend.
 
@@ -847,7 +847,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
     
     Args:
         query (str): The search query to look up
-        limit (int): Maximum number of results to return (default: 5)
+        limit (int): Maximum number of results to return (default: web.search_limit, 10 if unset)
     
     Returns:
         str: JSON string containing search results with the following structure:
@@ -869,10 +869,18 @@ def web_search_tool(query: str, limit: int = 5) -> str:
     Raises:
         Exception: If search fails or API key is not set
     """
+    if limit is None:
+        # No explicit limit: fall back to web.search_limit from config
+        # (default 10). Keeps the tool configurable without changing the
+        # model-facing signature.
+        cfg_limit = _load_web_config().get("search_limit", 10)
+        resolved = cfg_limit if isinstance(cfg_limit, int) else 10
+    else:
+        resolved = limit
     try:
-        limit = int(limit)
+        limit = int(resolved)
     except (TypeError, ValueError):
-        limit = 5
+        limit = 10
     limit = min(max(limit, 1), 100)
 
     debug_call_data = {
@@ -1654,7 +1662,7 @@ from tools.registry import registry, tool_error
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "Search the web for information. Returns up to 5 results by default with titles, URLs, and descriptions. The query is passed through to the configured backend, so operators such as site:domain, filetype:pdf, intitle:word, -term, and \"exact phrase\" may work when the backend supports them.",
+    "description": "Search the web for information. Returns up to 10 results by default with titles, URLs, and descriptions. The query is passed through to the configured backend, so operators such as site:domain, filetype:pdf, intitle:word, -term, and \"exact phrase\" may work when the backend supports them.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1664,10 +1672,10 @@ WEB_SEARCH_SCHEMA = {
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of results to return. Defaults to 5.",
+                "description": "Maximum number of results to return. Defaults to web.search_limit (10 when unset).",
                 "minimum": 1,
                 "maximum": 100,
-                "default": 5
+                "default": 10
             }
         },
         "required": ["query"]
@@ -1700,7 +1708,7 @@ registry.register(
     name="web_search",
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
-    handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
+    handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit")),
     check_fn=check_web_api_key,
     requires_env=_web_requires_env(),
     emoji="🔍",

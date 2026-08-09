@@ -546,6 +546,9 @@ DEFAULT_CONFIG = {
         # localhost/private-IP URLs are always exempt automatically.
         #   cache_exempt_hosts: ["mysite.vercel.app", "*.ngrok-free.app"]
         "cache_exempt_hosts": [],
+        # Default result count for web_search when no explicit limit is passed
+        # by the model (read by tools/web_tools.py; 10 when unset).
+        "search_limit": 10,
     },
 
     "browser": {
