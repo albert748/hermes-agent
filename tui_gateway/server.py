@@ -9188,6 +9188,13 @@ def _init_session(
             # Pin async event emissions to whichever transport created the
             # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
             "transport": current_transport() or _stdio_transport,
+            # ── CLI idle notification state (parity with cli.py) ──
+            # Armed by _run_prompt_submit after a non-empty response; reset by
+            # prompt.submit / slash.exec (user is back); the notification
+            # poller sends the completion push when the timeout expires.
+            "idle_notif_start": 0.0,
+            "idle_notif_sent": False,
+            "last_assistant_response": "",
         }
         _session_todo_state(_sessions[sid])
     _init_owns_db = False
@@ -12203,6 +12210,22 @@ def _notification_poller_loop(
                     f"{type(_loop_exc).__name__}: {_loop_exc}",
                     file=sys.stderr,
                 )
+        # ── Idle notification: timeout check (parity with cli.py) ──
+        # Reads config on every tick (cached with mtime check), so a config
+        # change hot-applies without restarting the TUI.
+        try:
+            _idle_cfg = (_load_cfg().get("cli") or {}).get("idle_notification") or {}
+            if _idle_cfg.get("enabled"):
+                _idle_start = session.get("idle_notif_start") or 0.0
+                if (
+                    _idle_start > 0
+                    and not session.get("idle_notif_sent")
+                    and time.time() - _idle_start
+                    > float(_idle_cfg.get("timeout", 300))
+                ):
+                    _send_idle_notification(sid, session, _idle_cfg)
+        except Exception:
+            pass
         if _now - _last_kanban_poll >= _KANBAN_POLL_SECONDS:
             _last_kanban_poll = _now
             try:
@@ -12546,6 +12569,75 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     _notification_pollers.append((stop, t))
     t.start()
     return stop
+
+
+def _send_idle_notification(sid: str, session: dict, cfg: dict) -> None:
+    """Send idle-timeout completion notification to configured platforms.
+
+    Parity with cli.py's ``_send_idle_notification``: fires when the agent
+    finished responding more than ``cli.idle_notification.timeout`` seconds
+    ago and the user hasn't submitted anything since. Runs the actual send on
+    a daemon thread so the poller loop never blocks on network I/O.
+    """
+    platforms = list(cfg.get("platforms") or [])
+    if not platforms:
+        return
+
+    summary = str(session.get("last_assistant_response") or "")
+    try:
+        max_chars = max(100, int(cfg.get("max_summary_chars", 1000)))
+    except (TypeError, ValueError):
+        max_chars = 1000
+    if len(summary) > max_chars:
+        summary = summary[:max_chars] + "…"
+
+    _started = session.get("idle_notif_start") or 0.0
+    elapsed_min = max(0, int((time.time() - _started) / 60)) if _started else 0
+    message = (
+        f"✅ TUI 任务完成，你已离开约 {elapsed_min} 分钟\n\n"
+        f"结果摘要：\n{summary}"
+    )
+
+    def _do_send() -> None:
+        import json
+
+        from tools.send_message_tool import send_message_tool
+
+        any_succeeded = False
+        for platform in platforms:
+            if platform == "telegram":
+                continue
+            try:
+                result_json = send_message_tool(
+                    {
+                        "action": "send",
+                        "target": platform,
+                        "message": message,
+                    }
+                )
+                result = json.loads(result_json) if isinstance(result_json, str) else {}
+                if result.get("error"):
+                    logger.warning(
+                        "Idle notification to '%s' failed: %s",
+                        platform, result["error"],
+                    )
+                else:
+                    logger.info(
+                        "Idle notification sent to '%s': %s",
+                        platform,
+                        result.get("success", result.get("note", "ok")),
+                    )
+                    any_succeeded = True
+            except Exception:
+                logger.exception(
+                    "Idle notification to '%s' raised exception", platform
+                )
+        if any_succeeded:
+            with _sessions_lock:
+                if sid in _sessions:
+                    _sessions[sid]["idle_notif_sent"] = True
+
+    threading.Thread(target=_do_send, daemon=True).start()
 
 
 def _hud_surface_note(session: dict) -> str:
@@ -13356,6 +13448,16 @@ def _run_prompt_submit(
                 terminal_receipt_committed = True
             if terminal_receipt_committed:
                 _retire_turn_marker(session, marker_key)
+
+            # ── Idle notification: start timer after agent finishes ──
+            # Parity with cli.py's process_loop: only a non-empty visible
+            # response arms the timer; the poller sends the completion push
+            # if the user hasn't replied within cli.idle_notification.timeout.
+            if isinstance(raw, str) and raw.strip():
+                session["last_assistant_response"] = raw
+                session["idle_notif_start"] = time.time()
+                session["idle_notif_sent"] = False
+
             _emit("message.complete", sid, payload)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────

@@ -1169,6 +1169,11 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
 
+    # User is back (typed a slash command): reset the idle-completion
+    # notification timer, parity with the prompt.submit handler.
+    session["idle_notif_start"] = 0.0
+    session["idle_notif_sent"] = False
+
     cmd = params.get("command", "").strip()
     if not cmd:
         return _err(rid, 4004, "empty command")

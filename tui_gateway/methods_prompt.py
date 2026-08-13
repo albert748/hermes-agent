@@ -423,6 +423,11 @@ def _(rid, params: dict) -> dict:
                             )
                             + "Update Hermes Desktop to continue it.",
                         )
+    # User is back: reset the idle-completion notification timer (parity with
+    # cli.py process_loop's user-input branch). Placed before the active-slot
+    # check so queued (busy) submissions also count as user activity.
+    session["idle_notif_start"] = 0.0
+    session["idle_notif_sent"] = False
     if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
         return _err(rid, 4090, limit_message)
     # Which desktop window this message was typed into. Rewritten on every
