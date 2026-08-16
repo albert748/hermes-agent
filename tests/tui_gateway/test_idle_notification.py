@@ -225,3 +225,62 @@ class TestSendIdleNotification:
         summary_part = captured["message"].split("结果摘要：\n", 1)[1]
         assert len(summary_part) <= 101  # 100 chars + ellipsis
         assert summary_part.endswith("…")
+
+    def test_in_flight_reentry_no_duplicate(self, monkeypatch):
+        """竞态回归：发送线程完成前再次触发不得重复发送。
+
+        2026-08-16 实证：poller 高频 tick 窗口内（发送完成前标志未置位）
+        并发启动多个发送线程，一次 idle 事件连发 10+ 条重复消息。
+        """
+        import json
+
+        session = _session(
+            idle_notif_start=time.time() - 65,
+            last_assistant_response="race repro",
+        )
+        monkeypatch.setattr(server, "_sessions", {"sid-race": session})
+        calls = []
+
+        def _slow_send(args):
+            calls.append(args.get("target"))
+            time.sleep(0.3)  # 模拟网络 IO：发送完成前 poller 有多个 tick 窗口
+            return json.dumps({"success": True})
+
+        monkeypatch.setattr(
+            "tools.send_message_tool.send_message_tool", _slow_send
+        )
+        cfg = _idle_cfg(platforms=["feishu"])
+
+        server._send_idle_notification("sid-race", session, cfg)
+        assert session["idle_notif_sent"] is True  # 启动前已置位（防重入）
+
+        server._send_idle_notification("sid-race", session, cfg)  # 发送中重入
+        time.sleep(0.5)  # 等发送线程完成
+        assert len(calls) == 1  # 只发送了一组
+        assert session["idle_notif_sent"] is True  # 成功后保持
+
+    def test_all_failed_resets_flag_after_in_flight(self, monkeypatch):
+        """全部平台失败 → 发送中防重入置位后重置为 False（可重试）。"""
+        import json
+
+        session = _session(
+            idle_notif_start=time.time() - 65,
+            last_assistant_response="will fail",
+        )
+        monkeypatch.setattr(server, "_sessions", {"sid-fail2": session})
+
+        def _slow_fail(args):
+            time.sleep(0.2)  # 模拟网络 IO：断言前线程仍在发送中
+            return json.dumps({"error": "boom"})
+
+        monkeypatch.setattr(
+            "tools.send_message_tool.send_message_tool", _slow_fail
+        )
+        server._send_idle_notification(
+            "sid-fail2", session, _idle_cfg(platforms=["feishu"])
+        )
+        assert session["idle_notif_sent"] is True  # 发送中防重入
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and session["idle_notif_sent"]:
+            time.sleep(0.02)
+        assert session["idle_notif_sent"] is False  # 全失败 → 重置可重试
