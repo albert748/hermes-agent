@@ -11777,6 +11777,11 @@ def _send_idle_notification(sid: str, session: dict, cfg: dict) -> None:
     platforms = list(cfg.get("platforms") or [])
     if not platforms:
         return
+    # 防重入：发送中或已发送（直到下次 agent 响应重置）不再触发。
+    # poller 在发送线程完成前会持续 tick，若无此检查将并发启动多个
+    # 发送线程（2026-08-16 实证：一次 idle 事件连发 10+ 条重复消息）。
+    if session.get("idle_notif_sent"):
+        return
 
     summary = str(session.get("last_assistant_response") or "")
     try:
@@ -11827,10 +11832,19 @@ def _send_idle_notification(sid: str, session: dict, cfg: dict) -> None:
                 logger.exception(
                     "Idle notification to '%s' raised exception", platform
                 )
-        if any_succeeded:
+        if not any_succeeded:
+            # 全部平台发送失败：重置标志，允许下次 poll 重试（原语义）。
             with _sessions_lock:
                 if sid in _sessions:
-                    _sessions[sid]["idle_notif_sent"] = True
+                    _sessions[sid]["idle_notif_sent"] = False
+
+    # 启动线程前同步置位，防止 poller 在发送完成前（网络 IO 窗口，
+    # feishu 等平台 1-2s/条 × 多平台）反复触发新的发送线程——
+    # 原实现在线程完成后才置位，poller 高频 tick 窗口内并发启动
+    # 多个线程 → 一次 idle 事件连发 10+ 条重复消息（2026-08-16 实证）。
+    with _sessions_lock:
+        if sid in _sessions:
+            _sessions[sid]["idle_notif_sent"] = True
 
     threading.Thread(target=_do_send, daemon=True).start()
 
