@@ -39,6 +39,12 @@ from typing import Any, Dict, List, Optional, Union
 
 from hermes_state_common import _RESET_END_REASONS
 
+from tools.search_query_expander import (
+    _should_expand,
+    expand_for_fts5,
+    score_session_results,
+)
+
 # Sources that are excluded from session browsing/searching by default.
 # Third-party integrations tag their sessions with HERMES_SESSION_SOURCE=tool;
 # delegate subagent runs are tagged "subagent"; kanban dispatcher workers are
@@ -773,9 +779,13 @@ def _discover(
     current_lineage_root = _resolve_lineage(db, current_session_id) if current_session_id else None
     title_result = _title_match_result(db, query, current_lineage_root)
 
+    # Expand multi-word AND queries to OR for better recall.
+    # Guard: skip if boolean operators or quoted phrases present.
+    expanded_query = expand_for_fts5(query) if _should_expand(query) else query
+
     try:
         raw_results = db.search_messages(
-            query=query,
+            query=expanded_query,
             role_filter=role_list,
             exclude_sources=list(_HIDDEN_SESSION_SOURCES),
             limit=_DISCOVER_SCAN_LIMIT,  # widen so dedup-by-lineage can find
@@ -926,6 +936,11 @@ def _discover(
         if lineage_root and lineage_root != hit_sid:
             entry["parent_session_id"] = lineage_root
         results.append(entry)
+
+    # Re-rank by term coverage score — multi-term queries get better recall
+    # via OR expansion, but coverage scoring puts best matches first.
+    if _should_expand(query):
+        results = score_session_results(results, query)
 
     for entry in results:
         entry["link"] = _session_link(entry["session_id"], link_profile)
