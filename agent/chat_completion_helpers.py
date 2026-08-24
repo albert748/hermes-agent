@@ -3294,6 +3294,75 @@ def cleanup_task_resources(agent, task_id: str) -> None:
             logger.warning("Failed to cleanup browser for task %s: %s", task_id, e)
 
 
+def _record_api_usage(
+    agent,
+    model_name: Optional[str],
+    usage_obj: Any,
+    *,
+    db_path: Optional[str] = None,
+) -> None:
+    """Persist one API call's usage (incl. prompt-cache breakdown) to api_usage.db.
+
+    Best-effort by design: usage accounting must never break the agent loop,
+    so every failure is swallowed and logged at debug level.
+
+    ``usage_obj`` may be an OpenAI SDK ``CompletionUsage`` (pydantic, has
+    ``model_dump``) or a plain namespace; both expose ``prompt_tokens`` /
+    ``completion_tokens``, and DeepSeek extends them with
+    ``prompt_cache_hit_tokens`` / ``prompt_cache_miss_tokens``.
+    """
+    try:
+        if usage_obj is None:
+            return
+        if hasattr(usage_obj, "model_dump"):
+            usage = usage_obj.model_dump()
+        elif isinstance(usage_obj, dict):
+            usage = usage_obj
+        else:
+            usage = vars(usage_obj)
+        hit = int(usage.get("prompt_cache_hit_tokens") or 0)
+        miss = int(usage.get("prompt_cache_miss_tokens") or 0)
+        prompt = int(usage.get("prompt_tokens") or 0)
+        completion = int(usage.get("completion_tokens") or 0)
+        import sqlite3
+
+        if db_path is None:
+            db_path = os.path.join(os.path.expanduser("~/.hermes"), "api_usage.db")
+        conn = sqlite3.connect(db_path, timeout=5)
+        try:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS api_usage ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " session_id TEXT,"
+                " timestamp REAL NOT NULL,"
+                " model TEXT,"
+                " prompt_tokens INTEGER,"
+                " cache_hit_tokens INTEGER,"
+                " cache_miss_tokens INTEGER,"
+                " completion_tokens INTEGER)"
+            )
+            conn.execute(
+                "INSERT INTO api_usage"
+                "(session_id, timestamp, model, prompt_tokens, cache_hit_tokens,"
+                " cache_miss_tokens, completion_tokens)"
+                " VALUES (?,?,?,?,?,?,?)",
+                (
+                    getattr(agent, "session_id", None),
+                    time.time(),
+                    model_name,
+                    prompt,
+                    hit,
+                    miss,
+                    completion,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("api_usage record skipped", exc_info=True)
+
+
 def _build_partial_stream_stub(
     role, full_content, full_reasoning, model_name, usage_obj, *,
     dropped_tool_names=None,
@@ -4512,6 +4581,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             message=mock_message,
             finish_reason=effective_finish_reason,
         )
+        _record_api_usage(agent, model_name, usage_obj)
         return SimpleNamespace(
             id="stream-" + str(uuid.uuid4()),
             model=model_name,
