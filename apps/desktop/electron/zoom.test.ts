@@ -12,9 +12,12 @@ import {
   applyZoomLevel,
   clampZoomLevel,
   DEFAULT_ZOOM_LEVEL,
+  installStartupZoomStabilizer,
   installZoomReassertOnWindowEvents,
   percentToZoomLevel,
   ZOOM_RESIZE_REASSERT_DELAY_MS,
+  ZOOM_STABILIZE_INTERVAL_MS,
+  ZOOM_STABILIZE_MAX_MS,
   ZOOM_STEP,
   ZOOM_STORAGE_KEY,
   zoomLevelToPercent,
@@ -123,6 +126,73 @@ test('focus event reasserts zoom immediately without debounce (Windows high-DPI 
   // focus should trigger immediate reassert — no timer involved
   handlers.get('focus')()
   assert.equal(calls, 1)
+})
+
+test('installStartupZoomStabilizer polls until zoom matches target twice in a row, then stops', () => {
+  vi.useFakeTimers()
+
+  try {
+    let current = 0.5
+    let reasserts = 0
+    const win = {
+      isDestroyed: () => false,
+      webContents: {
+        getZoomLevel: () => current
+      }
+    }
+
+    installStartupZoomStabilizer(
+      win,
+      () => {
+        reasserts += 1
+        current = 0.9 // target
+      },
+      () => 0.9
+    )
+
+    // First tick: mismatch → reassert (current becomes 0.9)
+    vi.advanceTimersByTime(500)
+    assert.equal(reasserts, 1)
+    // Second tick: match (stable 1)
+    vi.advanceTimersByTime(500)
+    // Third tick: match (stable 2) → timer cleared
+    vi.advanceTimersByTime(500)
+    assert.equal(reasserts, 1)
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+test('installStartupZoomStabilizer gives up after ZOOM_STABILIZE_MAX_MS of mismatch', () => {
+  vi.useFakeTimers()
+
+  try {
+    const win = {
+      isDestroyed: () => false,
+      webContents: {
+        getZoomLevel: () => 0.5 // never matches target
+      }
+    }
+
+    let reasserts = 0
+    installStartupZoomStabilizer(
+      win,
+      () => {
+        reasserts += 1
+      },
+      () => 0.9
+    )
+
+    vi.advanceTimersByTime(30_000)
+    // 60 ticks at 500ms — after MAX the timer is cleared
+    const ticksAtMax = reasserts
+    assert.equal(ticksAtMax, 60)
+    // Timer must be cleared — no further reasserts after the deadline
+    vi.advanceTimersByTime(10_000)
+    assert.equal(reasserts, ticksAtMax)
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 test('installZoomReassertOnWindowEvents debounces Linux resize and move events at the trailing edge', () => {

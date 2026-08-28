@@ -6157,6 +6157,7 @@ function installPreviewShortcut(window) {
 import {
   applyZoomLevel,
   DEFAULT_ZOOM_LEVEL,
+  installStartupZoomStabilizer,
   installZoomReassertOnWindowEvents,
   percentToZoomLevel,
   ZOOM_STEP,
@@ -10596,6 +10597,15 @@ function wireCommonWindowHandlers(win, { zoom = true }: { zoom?: boolean } = {})
     // listener is spent, so zoom was silently lost on renderer crash
     // recovery and any in-place reload/navigation (#46429).
     installZoomReassertOnWindowEvents(win, () => restorePersistedZoomLevel(win))
+    // Startup stabilizer: Chromium's activation-time display-metrics reset
+    // can land after every event-driven re-assert (Windows high-DPI). Poll
+    // the applied zoom against the persisted target until stable, so the
+    // first settings open already shows the user's real zoom.
+    installStartupZoomStabilizer(
+      win,
+      () => restorePersistedZoomLevel(win),
+      () => readZoomState() ?? DEFAULT_ZOOM_LEVEL
+    )
     win.webContents.on('did-finish-load', () => restorePersistedZoomLevel(win))
   }
 

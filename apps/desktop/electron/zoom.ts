@@ -65,6 +65,43 @@ export function applyZoomLevel(webContents, level) {
 // fallbacks before re-applying the persisted level.
 export const ZOOM_RESIZE_REASSERT_DELAY_MS = 100
 
+export const ZOOM_STABILIZE_INTERVAL_MS = 500
+export const ZOOM_STABILIZE_CONSECUTIVE_OK = 2
+export const ZOOM_STABILIZE_MAX_MS = 30_000
+
+export function installStartupZoomStabilizer(win, reassert, getTargetLevel) {
+  if (!win?.webContents || win.isDestroyed?.()) {
+    return
+  }
+
+  const started = Date.now()
+  let stableCount = 0
+
+  const timer = setInterval(() => {
+    if (win.isDestroyed?.() || Date.now() - started > ZOOM_STABILIZE_MAX_MS) {
+      clearInterval(timer)
+
+      return
+    }
+
+    const target = getTargetLevel()
+    const current = win.webContents.getZoomLevel()
+
+    if (Math.abs(current - target) < 0.001) {
+      stableCount += 1
+
+      if (stableCount >= ZOOM_STABILIZE_CONSECUTIVE_OK) {
+        clearInterval(timer)
+      }
+
+      return
+    }
+
+    stableCount = 0
+    reassert()
+  }, ZOOM_STABILIZE_INTERVAL_MS)
+}
+
 export function zoomReassertWindowEvents(platform = process.platform) {
   return platform === 'linux'
     ? ['show', 'restore', 'focus', 'resize', 'move']
