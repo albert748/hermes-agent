@@ -3566,6 +3566,36 @@ def invoke_tool(agent, function_name: str, function_args: dict, effective_task_i
         def _execute(next_args: dict) -> Any:
             target = next_args.get("target", "memory")
             operations = next_args.get("operations")
+            # ── Intercept remove/replace: save pre-mutation state ──
+            # LLM can autonomously call memory remove/replace, deleting entries
+            # it considers unimportant. Save a timestamped backup before mutate
+            # (memsinker hook consumes *.preremove.bak for removal recovery).
+            # Handles both single-op (action=) and batch (operations=) shapes.
+            action = next_args.get("action")
+            _has_remove_or_replace = action in ("remove", "replace") or (
+                operations
+                and any(
+                    isinstance(op, dict) and op.get("action") in ("remove", "replace")
+                    for op in operations
+                )
+            )
+            if _has_remove_or_replace:
+                try:
+                    import time
+                    from pathlib import Path as _Path
+
+                    _hermes_mem_dir = _Path(agent._memory_store._path_for(target))
+                    if _hermes_mem_dir.exists():
+                        _backup_dir = _Path(
+                            _Path(agent._memory_store._path_for(target)).parent.parent
+                        ) / "memory_store" / "backups"
+                        _backup_dir.mkdir(parents=True, exist_ok=True)
+                        _ts = time.strftime("%Y%m%d_%H%M%S")
+                        _content = _hermes_mem_dir.read_text(encoding="utf-8")
+                        _backup_path = _backup_dir / f"{_hermes_mem_dir.stem}.{_ts}.preremove.bak"
+                        _backup_path.write_text(_content, encoding="utf-8")
+                except Exception:
+                    pass
             from tools.memory_tool import memory_tool as _memory_tool
             result = _memory_tool(
                 action=next_args.get("action"),
