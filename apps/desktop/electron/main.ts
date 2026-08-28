@@ -6706,6 +6706,7 @@ function installPreviewShortcut(window) {
 import {
   applyZoomLevel,
   DEFAULT_ZOOM_LEVEL,
+  installStartupZoomStabilizer,
   installZoomReassertOnNavigation,
   installZoomReassertOnWindowEvents,
   percentToZoomLevel,
@@ -12727,6 +12728,15 @@ function wireCommonWindowHandlers(win, { zoom = true }: { zoom?: boolean } = {})
 
     installZoomReassertOnWindowEvents(win, reassertZoom)
     installZoomReassertOnNavigation(win.webContents, reassertZoom)
+    // Startup stabilizer: Chromium's activation-time display-metrics reset
+    // can land after every event-driven re-assert (Windows high-DPI). Poll
+    // the applied zoom against the persisted target until stable, so the
+    // first settings open already shows the user's real zoom.
+    installStartupZoomStabilizer(
+      win,
+      reassertZoom,
+      () => readZoomState() ?? DEFAULT_ZOOM_LEVEL
+    )
   }
 
   installContextMenuBridge(win)
