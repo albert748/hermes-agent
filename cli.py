@@ -33,6 +33,7 @@ import re
 import concurrent.futures
 import base64
 import atexit
+import signal
 import errno
 import tempfile
 import time
@@ -5081,7 +5082,14 @@ def save_config_value(key_path: str, value: any) -> bool:
         logger.error("Failed to save config: %s", e)
         return False
 
+def _detect_tmux() -> bool:
+    """Detect if the CLI is running inside a tmux session.
 
+    Checks the ``TMUX`` environment variable (set by tmux itself) and
+    falls back to ``TERM`` starting with ``tmux-``, which also covers
+    tmux-256color and similar variants.
+    """
+    return "TMUX" in os.environ or (os.environ.get("TERM") or "").startswith("tmux-")
 
 
 # ============================================================================
@@ -20868,6 +20876,27 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         _apply_bracketed_paste_timeout_patch()
 
         self._install_resize_recovery(app)
+
+        # ── tmux SIGCONT handler ────────────────────────────────────────
+        # When running inside tmux, switching panes sends SIGCONT to the
+        # restored process.  prompt_toolkit's tracked _cursor_pos drifts
+        # during the switch (no SIGWINCH fires), so the next incremental
+        # redraw starts from a wrong origin and overlaps content — the root
+        # cause of duplicated prompts and ghost status bars after tmux tab
+        # or pane switches.
+        #
+        # We catch SIGCONT and force a full redraw (erase_screen +
+        # renderer.reset) to re-sync the cursor position to (0, 0) before
+        # the next paint.  This matches the existing Ctrl+L / /redraw
+        # recovery path but fires automatically on pane restore.
+        if _detect_tmux():
+            def _on_sigcont(signum, frame):
+                try:
+                    self._force_full_redraw()
+                except Exception:
+                    pass
+
+            signal.signal(signal.SIGCONT, _on_sigcont)
 
         def spinner_loop():
             while not self._should_exit:
