@@ -2691,12 +2691,123 @@ _LONG_LIVED_FOREGROUND_PATTERNS = (
     re.compile(r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|watch)\b", re.IGNORECASE),
     re.compile(r"\bdocker\s+compose\s+up\b", re.IGNORECASE),
     re.compile(r"\bnext\s+dev\b", re.IGNORECASE),
-    re.compile(r"\bvite(?:\s|$)", re.IGNORECASE),
+    re.compile(r"\bvite(?:\.(?:js|ts|mjs|cjs))?(?:\s+(?!build\b)|$)", re.IGNORECASE),
     re.compile(r"\bnodemon\b", re.IGNORECASE),
     re.compile(r"\buvicorn\b", re.IGNORECASE),
     re.compile(r"\bgunicorn\b", re.IGNORECASE),
     re.compile(r"\bpython(?:3)?\s+-m\s+http\.server\b", re.IGNORECASE),
 )
+
+# A segment wrapped in `timeout <N>` is bounded: it cannot occupy the
+# foreground forever, so it is not a long-lived process even when the wrapped
+# executable is a server (`timeout 15 .venv/bin/python -m uvicorn ...`).
+# Optional `VAR=...` assignments, flags (e.g. `-s KILL`) and unit suffixes
+# (`15s`/`1m`) are accepted.
+_TIMEOUT_BOUNDED_SEGMENT_RE = re.compile(
+    r"^\s*(?:[A-Z_][A-Z0-9_]*=\S+\s+)*timeout\s+(?:[^\d\s][^\s]*\s+)*\d+(?:\.\d+)?(?:s|m|h|d)?\b",
+    re.IGNORECASE,
+)
+
+# Commands that START one of the services above, keyed by the pattern that
+# must then match their word sequence. Scoping long-lived detection to the
+# command's own word sequence means `ps aux | grep uvicorn` (inspection) is
+# never mistaken for `python -m uvicorn` (server start).
+_LONG_LIVED_START_WORDS = {
+    "npx",
+    "npm",
+    "pnpm",
+    "yarn",
+    "bun",
+    "docker",
+    "next",
+    "vite",
+    "uvicorn",
+    "gunicorn",
+    "nodemon",
+}
+
+
+def _shell_words(command: str) -> list[str]:
+    """Tokenize a command into shell words (quotes handled by shlex)."""
+    try:
+        return shlex.split(command)
+    except ValueError:
+        # Malformed quoting; fall back to whitespace split so detection still
+        # runs on whatever is present rather than silently skipping.
+        return command.split()
+
+
+def _logical_command_segments(command: str) -> list[str]:
+    """Split a command into logical units on shell list/pipeline operators.
+
+    ``&&``/``||`` are consumed as one separator. The split is quote-naive on
+    purpose: the caller strips quoted spans first, and the only job here is
+    to find where each command starts so server detection can be scoped.
+    """
+    parts: list[str] = []
+    i = 0
+    n = len(command)
+    while i < n:
+        while i < n and command[i].isspace():
+            i += 1
+        start = i
+        while i < n and command[i] not in ";|&":
+            i += 1
+        if i > start:
+            parts.append(command[start:i])
+        if i < n and command[i] in "&|" and i + 1 < n and command[i + 1] == command[i]:
+            i += 2
+        else:
+            i += 1
+    return parts
+
+
+def _command_start_words(segment: str) -> list[str]:
+    """Return the words that actually START the command in a segment.
+
+    Walks past env assignments, `cd <path> &&` links, and the common wrappers
+    (``sudo``/``env``/``exec``/``timeout N``), so the returned list begins
+    with the program being started (e.g. ``["python", "-m", "uvicorn", ...]``
+    or ``["ps", "aux", "|", "grep", ...]``).
+    """
+    words = _shell_words(segment)
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        # env assignment: FOO=1 (no spaces around `=`)
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w):
+            i += 1
+            continue
+        if w in ("cd",):
+            # consume `cd <path>` and a following `&&` / `;`
+            i += 2
+            while i < len(words) and words[i] in ("&&", ";"):
+                i += 1
+            continue
+        if w in ("sudo", "env", "exec", "timeout"):
+            i += 1
+            while i < len(words):
+                tok = words[i]
+                if tok in ("&&", ";", "|"):
+                    break
+                # consume a numeric arg (`timeout 5`)
+                if re.match(r"^-?\d", tok):
+                    i += 1
+                    continue
+                # consume short-option clusters and their value (`-s TERM`,
+                # `-u root`, `-k 30`); stop at the first bare word.
+                if re.match(r"^-[a-zA-Z]", tok):
+                    i += 1
+                    # a short option with a value?
+                    if i < len(words) and not words[i].startswith("-"):
+                        i += 1
+                    continue
+                break
+            continue
+        out.extend(words[i:])
+        break
+    return out
 
 
 def _looks_like_help_or_version_command(command: str) -> bool:
@@ -2708,6 +2819,32 @@ def _looks_like_help_or_version_command(command: str) -> bool:
         or " --version" in normalized
         or normalized.endswith(" -v")
     )
+
+
+def _is_detached_docker_compose_up(words: list[str]) -> bool:
+    """Return True when the command is ``docker compose up -d|--detach``.
+
+    ``docker compose up -d`` (or ``--detach``) hands the containers over to the
+    Docker daemon and the command line itself returns immediately — it is NOT a
+    long-lived foreground process, so it must not be nudged to background=true
+    (and must not be hard-blocked as a server start). Only bare ``docker
+    compose up`` (no detach) keeps the foreground attached and legitimately
+    trips the long-lived guard.
+    """
+    if not words:
+        return False
+    first = words[0].rsplit("/", 1)[-1]
+    if first != "docker":
+        return False
+    try:
+        up = words.index("up")
+    except ValueError:
+        return False
+    # `compose` must precede the `up` subcommand (so `docker ps | grep up`
+    # inspection stays untouched), and the detach flag must come after it.
+    if "compose" not in words[:up]:
+        return False
+    return any(tok in ("-d", "--detach") for tok in words[up + 1:])
 
 
 def _foreground_background_guidance(command: str) -> str | None:
@@ -2738,13 +2875,38 @@ def _foreground_background_guidance(command: str) -> str | None:
             "for bounded jobs — then run health checks and tests in follow-up terminal calls."
         )
 
-    for pattern in _LONG_LIVED_FOREGROUND_PATTERNS:
-        if pattern.search(unquoted):
-            return (
-                "This foreground command appears to start a long-lived server/watch process. "
-                "Run it with background=true, verify readiness (health endpoint/log signal), "
-                "then execute tests in a separate command."
-            )
+    # Only treat the command as a server start when its own word sequence
+    # begins with a long-lived executable. `ps aux | grep uvicorn` and
+    # `journalctl -u X | grep uvicorn` are inspections, not starts — the word
+    # `uvicorn` only appears as a grep operand there.
+    for segment in _logical_command_segments(unquoted):
+        # A `timeout <N>` wrapper bounds the command — it cannot occupy the
+        # foreground forever, so it is not a long-lived process even when the
+        # wrapped executable is a server (`timeout 15 .venv/bin/python -m
+        # uvicorn ...` smoke/restart tests).
+        if _TIMEOUT_BOUNDED_SEGMENT_RE.match(segment):
+            continue
+        words = _command_start_words(segment)
+        if not words:
+            continue
+        first = words[0].rsplit("/", 1)[-1]
+        if first not in _LONG_LIVED_START_WORDS and not first.startswith("python"):
+            # `python -m uvicorn` / `python -m http.server` start a service;
+            # any other first word (ps, grep, curl, ...) is not a start.
+            continue
+        if _is_detached_docker_compose_up(words):
+            # `docker compose up -d|--detach` returns immediately: the command
+            # line does not stay in the foreground, so it is not a long-lived
+            # foreground process (e.g. `cd x && docker compose down &&
+            # docker compose up -d` restart workflows).
+            continue
+        for pattern in _LONG_LIVED_FOREGROUND_PATTERNS:
+            if pattern.search(" ".join(words)):
+                return (
+                    "This foreground command appears to start a long-lived server/watch process. "
+                    "Run it with background=true, verify readiness (health endpoint/log signal), "
+                    "then execute tests in a separate command."
+                )
 
     return None
 

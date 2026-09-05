@@ -1685,7 +1685,16 @@ def _quoted_grep_pattern_spans(command: str) -> tuple[list[tuple[int, int]], boo
                 continue
             tokens = _shell_tokens_with_spans(segment, start)
             if tokens is None:
-                return [], True
+                # The grep word sits inside a construct whose quoting is not
+                # owned by the segment at this position — most commonly a
+                # double-quoted command substitution (`"$(grep -n 'x' f)"`).
+                # The command itself is well-formed; only the operand span
+                # cannot be established. Keep the operand visible (the raw
+                # command is still scanned by every other detector) and skip
+                # this grep rather than fail-closing the WHOLE command as
+                # malformed — that produced unconditional hardline blocks for
+                # benign workflows like `sed -n "$(grep -n 'x' f | cut -d: -f1)"`.
+                continue
             args = tokens[1:]
             pcre = False
             explicit_patterns = False
