@@ -34,6 +34,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any, Callable, Dict, List, Optional
 
 from agent.memory_provider import MemoryProvider, PRE_COMPRESS_CHECKPOINT_API_VERSION
+from agent.message_noise import is_system_injected_message
 from agent.skill_commands import extract_user_instruction_from_skill_message
 from tools.registry import tool_error
 
@@ -772,6 +773,13 @@ class MemoryManager:
 
         clean_user_content = self._strip_skill_scaffolding(user_content)
         if not clean_user_content:
+            return
+        # System-injected user-role rows (background notifications, OOB
+        # steering, delegation echoes) carry no real user words — never mirror
+        # them into external memory (see agent.message_noise; the primary gate
+        # is run_agent._mirror_turn_to_memory, this is defense in depth for
+        # any other sync_all caller).
+        if is_system_injected_message(clean_user_content):
             return
         user_content = clean_user_content
 

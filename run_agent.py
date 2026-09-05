@@ -149,6 +149,7 @@ from tools.browser_tool import cleanup_browser
 # Agent internals extracted to agent/ package for modularity
 from agent.memory_manager import sanitize_context
 from agent.memory_provider import is_trivial_prompt
+from agent.message_noise import is_system_injected_message
 from agent.error_classifier import FailoverReason
 from agent.redact import redact_sensitive_text
 from agent.message_content import flatten_message_text
@@ -4548,6 +4549,14 @@ class AIAgent:
         user_text = _summarize_user_message_for_log(original_user_message, sep="\n")
         response_text = _summarize_user_message_for_log(final_response, sep="\n")
         if not (user_text and response_text):
+            return
+        # System-injected user-role rows (background-process notifications,
+        # out-of-band steering wrappers, delegation echoes, ...) are not the
+        # user speaking. Mirroring them into external memory pollutes recall
+        # with process noise, and keying the next turn's prefetch on them
+        # searches on zero-signal text. Same policy the compression paths use
+        # (see agent.message_noise).
+        if is_system_injected_message(user_text):
             return
         try:
             sync_kwargs = {"session_id": self.session_id or ""}

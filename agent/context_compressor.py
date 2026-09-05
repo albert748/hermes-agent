@@ -36,6 +36,7 @@ from agent.auxiliary_client import (
 )
 from agent.context_engine import ContextEngine, sanitize_memory_context
 from agent.error_classifier import FailoverReason, classify_api_error
+from agent.message_noise import is_system_injected_message
 from agent.message_sanitization import tool_result_id_variants
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
@@ -1046,16 +1047,9 @@ def _lean_recovery_stub(tool_name: str, content_len: int, session_id: str) -> st
 
 def _synthetic_user_row(content: str) -> bool:
     """True for scaffolding user rows that carry no real user words."""
-    if not isinstance(content, str) or not content.strip():
-        return True
-    stripped = content.lstrip()
-    _synthetic_prefixes = (
-        "[System:", "[CONTEXT", "[PRIOR CONTEXT", "[IMPORTANT: Background",
-        "[Your active task list", "[Planning state preserved",
-        "[ASYNC DELEGATION", "[OUT-OF-BAND",
-        "Cronjob Response:",
-    )
-    return stripped.startswith(_synthetic_prefixes)
+    # Shared policy with memory retain + conversation compression
+    # (agent/message_noise.py).
+    return is_system_injected_message(content)
 
 
 def _build_verbatim_user_section(turns: List[Dict[str, Any]]) -> str:

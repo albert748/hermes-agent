@@ -77,6 +77,7 @@ from agent.model_metadata import (
     estimate_request_tokens_rough,
 )
 from agent.session_activity import ActivityProvenance, normalize_activity_provenance
+from agent.message_noise import SYSTEM_INJECTED_PREFIXES
 
 logger = logging.getLogger(__name__)
 
@@ -2702,13 +2703,7 @@ def conversation_history_after_compression(
     return None
 
 
-_SYNTHETIC_USER_PREFIXES = (
-    "[System: Your previous response was truncated",
-    "[System: The previous response was cut off",
-    "[System: Your previous tool call",
-    "[Your active task list was preserved across context compression]",
-    "[IMPORTANT: Background process ",
-)
+_SYNTHETIC_USER_PREFIXES = SYSTEM_INJECTED_PREFIXES  # shared with memory retain (agent/message_noise.py)
 
 
 def _message_text(message: Any) -> str:

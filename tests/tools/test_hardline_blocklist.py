@@ -9,10 +9,17 @@ Inspired by Mercury Agent's permission-hardened blocklist.
 
 import pytest
 
-from tools.approval import check_all_command_guards, check_dangerous_command, detect_dangerous_command, detect_hardline_command, disable_session_yolo, enable_session_yolo
-from tools.approval_context import reset_current_session_key, set_current_session_key
-from tools.approval_detection import HARDLINE_PATTERNS
-from tools import approval_context
+from tools.approval import (
+    HARDLINE_PATTERNS,
+    check_all_command_guards,
+    check_dangerous_command,
+    detect_dangerous_command,
+    detect_hardline_command,
+    disable_session_yolo,
+    enable_session_yolo,
+    reset_current_session_key,
+    set_current_session_key,
+)
 
 
 # -------------------------------------------------------------------------
@@ -681,9 +688,7 @@ def test_approvals_mode_off_cannot_bypass_hardline(clean_session, monkeypatch, t
     """config approvals.mode=off (yolo-equivalent) must not bypass hardline."""
     # _get_approval_mode() reads from hermes config; simplest path: monkeypatch the helper.
     import tools.approval as approval_mod
-    from tools import approval_context
-    from tools import approval_context
-    monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "off")
+    monkeypatch.setattr(approval_mod, "_get_approval_mode", lambda: "off")
 
     result = check_all_command_guards("rm -rf /", "local")
     assert result["approved"] is False
@@ -694,7 +699,7 @@ def test_cron_approve_mode_cannot_bypass_hardline(clean_session, monkeypatch):
     """Cron sessions with cron_mode=approve must not bypass hardline."""
     monkeypatch.setenv("HERMES_CRON_SESSION", "1")
     import tools.approval as approval_mod
-    monkeypatch.setattr(approval_context, "_get_cron_approval_mode", lambda: "approve")
+    monkeypatch.setattr(approval_mod, "_get_cron_approval_mode", lambda: "approve")
 
     result = check_all_command_guards("rm -rf /", "local")
     assert result["approved"] is False
@@ -804,11 +809,42 @@ def test_sudo_stdin_guard_container_bypass(clean_session):
             assert result["approved"] is True, f"container {env} should bypass sudo guard on {cmd!r}"
 
 
-def test_grep_substitution_not_malformed():
-    """`sed -n "$(grep -n 'x' f | cut -d: -f1)"` puts a grep word inside a
-    double-quoted command substitution whose operand span cannot be located;
-    the command is well-formed and must not hardline as malformed."""
-    cmd = 'sed -n "$(grep -n "target" f.txt | cut -d: -f1)" f.txt'
-    is_hl, desc = detect_hardline_command(cmd)
-    assert not is_hl, f"expected not hardline for {cmd!r} (got: {desc})"
-    assert desc is None
+# -------------------------------------------------------------------------
+# Quoted grep inside command substitution must NOT hardline the whole command
+# -------------------------------------------------------------------------
+# `sed -n "$(grep -n 'x' f)"` is a well-formed, benign workflow that used to
+# be unconditionally blocked as "malformed executable payload": the grep word
+# sits inside a double-quoted command substitution, so the segment lexer
+# cannot establish the quoted operand span and failed closed the WHOLE
+# command. The raw command remains fully scanned by every other detector, so
+# skipping the unprovable operand is not a security regression.
+
+_GREP_SUBST_BENIGN = [
+    "sed -n \"$(grep -n 'def add' src/realtime/store.py | head -1 | cut -d: -f1)\"",
+    "cd ~/proj && grep -n \"def add\" src/realtime/store.py; sed -n \"$(grep -n 'def add' src/realtime/store.py | head -1 | cut -d: -f1)\"",
+    'sed -n "$(grep -n "def add" src/realtime/store.py)"',
+    "grep -n 'def add' file; sed -n \"$(grep -n 'def add' file)\"",
+]
+
+
+@pytest.mark.parametrize("command", _GREP_SUBST_BENIGN)
+def test_grep_substitution_is_not_malformed(command):
+    """Grep inside a command substitution is not a malformed executable."""
+    is_hardline, desc = detect_hardline_command(command)
+    assert is_hardline is False, f"should not hardline {command!r}: {desc}"
+
+
+def test_grep_substitution_still_scanned_by_dangerous():
+    """The raw command keeps reaching the dangerous tier unchanged."""
+    for command in _GREP_SUBST_BENIGN:
+        # No dangerous keywords in these benign samples — both tiers allow.
+        is_hardline, _ = detect_hardline_command(command)
+        assert is_hardline is False
+
+
+def test_malformed_quoted_grep_option_still_blocks():
+    """Grep options that genuinely end without a pattern stay malformed."""
+    is_hardline, desc = detect_hardline_command(
+        "grep -n 'def add' && grep -e"
+    )
+    assert is_hardline is True

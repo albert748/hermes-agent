@@ -23,9 +23,9 @@ real background operator is not.
 """
 
 from tools.shell_heredoc import strip_inert_heredoc_bodies
-from tools.terminal_tool_guards import _strip_quotes
 from tools.terminal_tool import (
     _foreground_background_guidance as guidance,
+    _strip_quotes,
 )
 
 # Build commands without a literal '&' in this source where convenient, so the
@@ -87,14 +87,17 @@ class TestInertQuotedHeredocPayloadAllowed:
         )
         assert guidance(cmd) is None
 
-
-class TestPrologueLinkAndCompoundOpener:
-    """`cd <path> &&` / `source <path> &&` prologue links, `timeout <N>`
-    wrappers, `~`/relative interpreter paths and compound openers
-    (`|`/`&&`) keep a quoted heredoc body inert — unless a shell consumer
-    sits on the opener line (fail-closed)."""
-
     def test_cd_link_does_not_defeat_python_heredoc(self):
+        """The extremely common `cd ~/x && python - <<'EOF'` has its heredoc
+        body masked: the cd link only changes the working directory."""
+        cmd = (
+            "cd ~/proj " + AMP + AMP + " .venv/bin/python - <<'EOF'" + NL
+            + "m = (a > 1) " + AMP + " (b < 4)" + NL
+            + "EOF"
+        )
+        assert guidance(cmd) is None
+
+    def test_cd_abs_path_does_not_defeat_python_heredoc(self):
         cmd = (
             "cd ~/proj " + AMP + AMP + " python3 - <<'EOF'" + NL
             + "x = a " + AMP + " b" + NL
@@ -102,95 +105,50 @@ class TestPrologueLinkAndCompoundOpener:
         )
         assert guidance(cmd) is None
 
-    def test_cd_abs_path_does_not_defeat_python_heredoc(self):
-        cmd = (
-            "cd /tmp/proj " + AMP + AMP + " .venv/bin/python - <<'EOF'" + NL
-            + "x = a " + AMP + " b" + NL
-            + "EOF"
-        )
-        assert guidance(cmd) is None
-
     def test_tilde_interpreter_path_allowed(self):
+        """`~/project/.venv/bin/python - <<'EOF'` — tilde path prefix."""
         cmd = (
-            "cd ~/docker " + AMP + AMP + " ~/venv/bin/python3 - <<'EOF'" + NL
-            + "x = a " + AMP + " b" + NL
+            "~/project/.venv/bin/python - <<'EOF'" + NL
+            + "y = (a) " + AMP + " (b)" + NL
             + "EOF"
         )
         assert guidance(cmd) is None
 
     def test_timeout_wrapper_does_not_defeat_heredoc(self):
         cmd = (
-            "cd ~/proj " + AMP + AMP + " timeout 15 .venv/bin/python - <<'EOF'" + NL
-            + "x = a " + AMP + " b" + NL
+            "cd ~/proj " + AMP + AMP + " timeout 150 .venv/bin/python - <<'PYEOF'" + NL
+            + "z = p " + AMP + " q" + NL
+            + "PYEOF"
+        )
+        assert guidance(cmd) is None
+
+    def test_multiple_cd_links_do_not_defeat_heredoc(self):
+        cmd = (
+            "cd /tmp " + AMP + AMP + " cd ~/proj " + AMP + AMP + " python3 - <<'EOF'" + NL
+            + "v = a " + AMP + " b" + NL
             + "EOF"
         )
         assert guidance(cmd) is None
 
     def test_source_activate_link_does_not_defeat_heredoc(self):
+        """`source .venv/bin/activate && PYTHONPATH=src python <<'EOF'` — the
+        source prologue sets up the venv; the body still belongs to python."""
         cmd = (
-            "cd ~/proj " + AMP + AMP + " source .venv/bin/activate " + AMP + AMP
-            + " python3 - <<'EOF'" + NL
-            + "x = a " + AMP + " b" + NL
+            "cd ~/proj " + AMP + AMP + " source .venv/bin/activate "
+            + AMP + AMP + " PYTHONPATH=src python - <<'EOF'" + NL
+            + "cnt = ((R.days_to_low >= a) " + AMP + " (R.days_to_low <= b)).sum()" + NL
             + "EOF"
         )
         assert guidance(cmd) is None
 
-    def test_cd_with_substitution_does_not_authorize_python_heredoc(self):
+    def test_source_link_bash_consumer_still_scanned(self):
+        """source before bash — bash executes its body as shell, no masking."""
         cmd = (
-            "cd $(pwd) " + AMP + AMP + " python3 - <<'EOF'" + NL
-            + "x = a " + AMP + " b" + NL
-            + "EOF"
-        )
-        assert guidance(cmd) is not None
-
-    def test_cd_link_without_amp_does_not_authorize_heredoc(self):
-        cmd = (
-            "cd /tmp python3 - <<'EOF'" + NL
-            + "x = a " + AMP + " b" + NL
-            + "EOF"
-        )
-        assert guidance(cmd) is not None
-
-    def test_cd_link_bash_consumer_still_scanned(self):
-        cmd = (
-            "cd /tmp " + AMP + AMP + " bash - <<'EOF'" + NL
+            "source .venv/bin/activate " + AMP + AMP + " bash - <<'EOF'" + NL
             + "nohup sleep 10 " + AMP + NL
             + "EOF"
         )
         assert guidance(cmd) is not None
-
-    def test_python_heredoc_into_pipeline_is_masked(self):
-        cmd = (
-            "cd ~/proj && timeout 120 python3 -u - <<'EOF' 2>&1 | grep -v 'no match'" + NL
-            + "mask = (df['a'] > 1) " + AMP + " (df['b'] < 4)" + NL
-            + "EOF"
-        )
-        assert guidance(cmd) is None
-
-    def test_python_heredoc_after_amp_amp_link_is_masked(self):
-        cmd = (
-            "cd ~/proj && .venv/bin/python scripts/build_x.py && .venv/bin/python - <<'EOF'" + NL
-            + "bad = (df['d'] > date(2026,1,1)) " + AMP + " (df['s'] == 'active')" + NL
-            + "EOF"
-        )
-        assert guidance(cmd) is None
-
-    def test_cat_heredoc_into_shell_pipe_stays_visible(self):
-        """`cat <<'EOF' | bash` hands the body to a shell — fail closed."""
-        cmd = (
-            "cat <<'EOF' | bash" + NL
-            + "nohup sleep 10 " + AMP + NL
-            + "EOF"
-        )
-        assert guidance(cmd) is not None
-
-    def test_cat_heredoc_redirect_single_command_still_masked(self):
-        cmd = (
-            "cat > /tmp/out.py << 'PYEOF'" + NL
-            + 'proxies = {"http": "http://127.0.0.1:7893"}' + NL
-            + "PYEOF"
-        )
-        assert guidance(cmd) is None
 
 
 class TestUnsafeHeredocPayloadRemainsVisible:
@@ -229,6 +187,33 @@ class TestUnsafeHeredocPayloadRemainsVisible:
         )
         assert guidance(cmd) is not None
 
+    def test_cd_with_substitution_does_not_authorize_python_heredoc(self):
+        """`cd $(...) && python` runs a command in the path — not inert."""
+        cmd = (
+            "cd $(pwd) " + AMP + AMP + " python3 - <<'EOF'" + NL
+            + "x = a " + AMP + " b" + NL
+            + "EOF"
+        )
+        assert guidance(cmd) is not None
+
+    def test_cd_link_without_amp_does_not_authorize_heredoc(self):
+        """`python` after a cd not followed by `&&` is not a link: no masking."""
+        cmd = (
+            "cd /tmp python3 - <<'EOF'" + NL
+            + "x = a " + AMP + " b" + NL
+            + "EOF"
+        )
+        assert guidance(cmd) is not None
+
+    def test_cd_link_bash_consumer_still_scanned(self):
+        """cd link before bash — bash executes its body as shell, no masking."""
+        cmd = (
+            "cd /tmp " + AMP + AMP + " bash - <<'EOF'" + NL
+            + "nohup sleep 10 " + AMP + NL
+            + "EOF"
+        )
+        assert guidance(cmd) is not None
+
     def test_pipeline_python_does_not_authorize_bash_heredoc(self):
         cmd = (
             "bash <<'EOF' | python3" + NL
@@ -236,6 +221,54 @@ class TestUnsafeHeredocPayloadRemainsVisible:
             + "EOF"
         )
         assert guidance(cmd) is not None
+
+
+class TestCompoundOpenerInertInterpreter:
+    """A quoted heredoc fed to a program interpreter stays inert even when the
+    opener is compound (`|`/`&&`/`&`): the body is program text for that
+    interpreter, never shell stdin. Compound openers with a shell consumer on
+    the line (`cat <<'EOF' | bash`) keep the body visible (fail-closed)."""
+
+    def test_python_heredoc_into_pipeline_is_masked(self):
+        cmd = (
+            "cd ~/proj && timeout 120 python3 -u - <<'EOF' 2>&1 | grep -v 'K线为空'" + NL
+            + "mask = (df['a'] > 1) " + AMP + " (df['b'] < 4)" + NL
+            + "EOF"
+        )
+        assert guidance(cmd) is None
+
+    def test_python_heredoc_after_amp_amp_link_is_masked(self):
+        cmd = (
+            "cd ~/proj && .venv/bin/python scripts/build_securities.py && .venv/bin/python - <<'EOF'" + NL
+            + "bad = (df['list_date'] > date(2026,1,1)) " + AMP + " (df['status'] == 'active')" + NL
+            + "EOF"
+        )
+        assert guidance(cmd) is None
+
+    def test_python_heredoc_after_timeout_with_pipe_is_masked(self):
+        cmd = (
+            "cd ~/proj && timeout 300 .venv/bin/python - <<'EOF' 2>&1 | grep -v Warning" + NL
+            + "m = (df['c'] > 5) " + AMP + " (df['c'] < 10)" + NL
+            + "EOF"
+        )
+        assert guidance(cmd) is None
+
+    def test_cat_heredoc_into_shell_pipe_stays_visible(self):
+        """`cat <<'EOF' | bash` hands the body to a shell — fail closed."""
+        cmd = (
+            "cat <<'EOF' | bash" + NL
+            + "nohup sleep 10 " + AMP + NL
+            + "EOF"
+        )
+        assert guidance(cmd) is not None
+
+    def test_cat_heredoc_redirect_single_command_still_masked(self):
+        cmd = (
+            "cat > /tmp/clash_proxy_bing.py << 'PYEOF'" + NL
+            + 'proxies = {"http": "http://"}' + NL
+            + "PYEOF"
+        )
+        assert guidance(cmd) is None
 
     def test_nested_substitution_does_not_authorize_heredoc(self):
         cmd = (
